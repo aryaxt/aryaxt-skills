@@ -1,0 +1,19 @@
+{
+  "name": "aryaxt-skills",
+  "description": "Aryan's shared Claude Code skills — iOS dev (simulator/device/testflight), web dev (chrome), Firebase debugging, ship workflows, and decision tooling. Project-specific values come from each project's scripts/ios-config.sh.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Aryan Ghassemi",
+    "email": "aryaxt@gmail.com"
+  },
+  "homepage": "https://github.com/aryaxt/aryaxt-skills",
+  "repository": "https://github.com/aryaxt/aryaxt-skills",
+  "license": "MIT",
+  "keywords": [
+    "ios",
+    "xcode",
+    "firebase",
+    "saas-template",
+    "personal-workflows"
+  ]
+}
