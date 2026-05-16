@@ -447,7 +447,7 @@ When in doubt, ask. The cost of a 30s confirmation prompt is much smaller than s
 
 Step 5.5's `/qa` is human-driven visual verification. This step is the *automated* counterpart: decide which existing XCUITest covers the changed flow (and run it), or write a new one if the behavior isn't covered. Catches regressions later when the human running `/qa` doesn't.
 
-The XCUITest stack lives at `ios/$IOS_SCHEMEUITests/`, runs via `./scripts/run-ui-tests.sh <ClassName>` — it mints a Firebase custom token, signs in as the QA user, then drives the app. Page objects in `TestSupport/Pages/` centralize locators per screen.
+The XCUITest stack lives at `ios/DatingAIAssistantUITests/`, runs via `./scripts/run-ui-tests.sh <ClassName>` — it mints a Firebase custom token, signs in as the QA user, then drives the app. Page objects in `TestSupport/Pages/` centralize locators per screen.
 
 ### When to skip Step 5.6 entirely
 
@@ -470,7 +470,7 @@ Map the changed views/flows to existing UITest classes:
 # DashboardPage. Catch both direct references and page-object usage.
 for view in $(echo "$IOS_UI_DIFF" | xargs -n1 basename | sed 's/\.swift$//'); do
   echo "=== $view ==="
-  /usr/bin/grep -lE "$view|${view%View}Page" ios/$IOS_SCHEMEUITests/**/*.swift 2>/dev/null
+  /usr/bin/grep -lE "$view|${view%View}Page" ios/DatingAIAssistantUITests/**/*.swift 2>/dev/null
 done
 ```
 
@@ -490,7 +490,7 @@ When writing a new UITest:
 - Locate UI elements via page objects; add `.accessibilityIdentifier(...)` to the source view if a needed element doesn't have one yet (don't change `.accessibilityLabel` — that's what VoiceOver speaks).
 - One assertion per test; split if you find yourself asserting four things.
 - No sleep — use `waitForExistence(timeout:)`.
-- See `ios/$IOS_SCHEMEUITests/README.md` for conventions.
+- See `ios/DatingAIAssistantUITests/README.md` for conventions.
 
 ### Step 5.6.2 — Run
 
@@ -639,17 +639,32 @@ In any other case (`ios/**/*.swift`, `ios/project.yml` with new source paths, an
 
 ### Run
 
+**Worktree note:** if `/doit` is running from a worktree (almost always — `/doit` typically creates a feature branch under `.claude/worktrees/`), the `../../saas-template/...` SPM paths in `ios/project.yml` don't resolve. Symlink the peer location first (same pattern `/chrome` uses for `.env.local`):
+
+```bash
+WORKTREE_ROOT=$(git rev-parse --show-toplevel)
+GIT_COMMON_ABS=$(cd "$WORKTREE_ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+PARENT_REPO=$(dirname "$GIT_COMMON_ABS")
+if [ "$PARENT_REPO" != "$WORKTREE_ROOT" ]; then
+  SAAS_SOURCE="$(dirname "$PARENT_REPO")/saas-template"
+  SAAS_PEER="$(dirname "$WORKTREE_ROOT")/saas-template"
+  [ -d "$SAAS_SOURCE" ] && [ ! -e "$SAAS_PEER" ] && ln -s "$SAAS_SOURCE" "$SAAS_PEER"
+fi
+```
+
+Then:
+
 ```bash
 cd ios && xcodebuild \
-  -project $IOS_SCHEME.xcodeproj \
-  -scheme $IOS_SCHEME \
+  -project DatingAIAssistant.xcodeproj \
+  -scheme DatingAIAssistant \
   -configuration Debug \
   -destination "platform=iOS Simulator,name=iPhone 17" \
-  -derivedDataPath $IOS_SIM_BUILD_CACHE \
+  -derivedDataPath /tmp/datingai-sim-build \
   build 2>&1 | tail -10
 ```
 
-Expected: `** BUILD SUCCEEDED **`. The shared `$IOS_SIM_BUILD_CACHE` cache is the same one `/simulator` uses, so this is usually 15-30s on a warm build.
+Expected: `** BUILD SUCCEEDED **`. The shared `/tmp/datingai-sim-build` cache is the same one `/simulator` uses, so this is usually 15-30s on a warm build.
 
 ### On failure
 
@@ -688,11 +703,11 @@ Squash-merge can produce code that **doesn't exist in either side individually**
 ```bash
 git checkout main && git pull --ff-only origin main
 cd ios && xcodebuild \
-  -project $IOS_SCHEME.xcodeproj \
-  -scheme $IOS_SCHEME \
+  -project DatingAIAssistant.xcodeproj \
+  -scheme DatingAIAssistant \
   -configuration Debug \
   -destination "platform=iOS Simulator,name=iPhone 17" \
-  -derivedDataPath $IOS_SIM_BUILD_CACHE \
+  -derivedDataPath /tmp/datingai-sim-build \
   build 2>&1 | tail -10
 ```
 
@@ -714,7 +729,7 @@ Output a structured report in this exact shape — the user should be able to gr
 
 | PR | Title | Merge commit |
 |---|---|---|
-| #N | <title> | [<sha>](https://github.com/<your-org>/<your-repo>/commit/<sha>) |
+| #N | <title> | [<sha>](https://github.com/aryaxt/photo-ai/commit/<sha>) |
 
 ### Review findings + resolutions
 

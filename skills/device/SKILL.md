@@ -5,7 +5,7 @@ description: Build and install the iOS app on a real iPhone or iPad connected by
 
 # /device — build and install the iOS app on a real iPhone/iPad
 
-The iOS app lives at `ios/$IOS_SCHEME.xcodeproj` (scheme `$IOS_SCHEME`, bundle id `$IOS_BUNDLE_ID`, team `$IOS_TEAM_ID`, automatic signing). This skill builds for a connected device and installs + launches it via `xcrun devicectl`.
+The iOS app lives at `ios/DatingAIAssistant.xcodeproj` (scheme `DatingAIAssistant`, bundle id `com.shivaapps.photoai`, team `C5GK8X5LBQ`, automatic signing). This skill builds for a connected device and installs + launches it via `xcrun devicectl`.
 
 USB and Wi-Fi devices look identical to `devicectl` once they're paired in Xcode — we don't have to do anything different for the two transports. The user pairs once via Xcode → Window → Devices and Simulators → "Connect via network", and from then on the device shows up in `devicectl list devices` whenever it's awake on the same network.
 
@@ -56,30 +56,45 @@ If multiple devices match a fragment, prefer the first one but mention in the fi
 
 Use a stable derived-data path so successive runs hit the cache. Run in background — first build is 2–4 min, subsequent are 15–45s. Note the build folder is **`Debug-iphoneos`** (not `Debug-iphonesimulator`).
 
+**Worktree note:** if running from a worktree (`.claude/worktrees/<name>/`), the saas-template SPM paths (`../../saas-template/packages/...` in `ios/project.yml`) don't resolve. Symlink the peer location first (same pattern `/chrome` uses for `.env.local`):
+
+```bash
+WORKTREE_ROOT=$(git rev-parse --show-toplevel)
+GIT_COMMON_ABS=$(cd "$WORKTREE_ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+PARENT_REPO=$(dirname "$GIT_COMMON_ABS")
+if [ "$PARENT_REPO" != "$WORKTREE_ROOT" ]; then
+  SAAS_SOURCE="$(dirname "$PARENT_REPO")/saas-template"
+  SAAS_PEER="$(dirname "$WORKTREE_ROOT")/saas-template"
+  [ -d "$SAAS_SOURCE" ] && [ ! -e "$SAAS_PEER" ] && ln -s "$SAAS_SOURCE" "$SAAS_PEER"
+fi
+```
+
+Then:
+
 ```bash
 xcodebuild \
-  -project ios/$IOS_SCHEME.xcodeproj \
-  -scheme $IOS_SCHEME \
+  -project ios/DatingAIAssistant.xcodeproj \
+  -scheme DatingAIAssistant \
   -configuration Debug \
   -destination "generic/platform=iOS" \
-  -derivedDataPath $IOS_DEVICE_BUILD_CACHE \
+  -derivedDataPath /tmp/datingai-device-build \
   -allowProvisioningUpdates \
   build
 ```
 
 Why these flags:
 - `generic/platform=iOS` — compile once for any iOS device. We don't pin to the UDID at build time because the artifact works on any compatible device with a valid provisioning profile, and pinning sometimes makes Xcode try to "prepare" the device, which fails if it's locked.
-- `-allowProvisioningUpdates` — lets Xcode auto-fetch / refresh the development profile for `$IOS_BUNDLE_ID` from the configured team. Without it, a stale profile is a hard error.
+- `-allowProvisioningUpdates` — lets Xcode auto-fetch / refresh the development profile for `com.shivaapps.photoai` from the configured team. Without it, a stale profile is a hard error.
 
 If the build fails:
-- **Code signing** ("No profile matching ... was found", "Provisioning profile doesn't include..."). Tell the user: "Open Xcode once, sign in to your Apple ID under Settings → Accounts if needed, and let it generate a profile for team `$IOS_TEAM_ID`." Don't try to hand-edit `project.pbxproj` to fix this.
+- **Code signing** ("No profile matching ... was found", "Provisioning profile doesn't include..."). Tell the user: "Open Xcode once, sign in to your Apple ID under Settings → Accounts if needed, and let it generate a profile for team `C5GK8X5LBQ`." Don't try to hand-edit `project.pbxproj` to fix this.
 - **Device not registered** ("...device with identifier `<UDID>` is not registered"). Open Xcode → Window → Devices and Simulators, plug in the device once, and accept the trust prompt on the phone. After that, automatic signing will register it.
 - **Real Swift compile error** — surface the actual diagnostic. Don't try to "fix" it without showing the user.
 
 ## Step 4 — install
 
 ```bash
-APP=$(find $IOS_DEVICE_BUILD_CACHE/Build/Products/Debug-iphoneos -maxdepth 2 -type d -name "$IOS_SCHEME.app" | head -1)
+APP=$(find /tmp/datingai-device-build/Build/Products/Debug-iphoneos -maxdepth 2 -type d -name "DatingAIAssistant.app" | head -1)
 [ -z "$APP" ] && { echo "Build succeeded but .app not found at expected path"; exit 1; }
 
 xcrun devicectl device install app --device "$DEVICE_UDID" "$APP"
@@ -93,7 +108,7 @@ Common failures and what to surface:
 ## Step 5 — launch
 
 ```bash
-xcrun devicectl device process launch --device "$DEVICE_UDID" --terminate-existing $IOS_BUNDLE_ID
+xcrun devicectl device process launch --device "$DEVICE_UDID" --terminate-existing com.shivaapps.photoai
 ```
 
 `--terminate-existing` matches what Xcode does on Run: kill any prior instance so the user sees a fresh launch, not whatever stale state was already there.
@@ -104,15 +119,15 @@ If launch fails with "App is not installed" right after a successful install, th
 
 One short sentence:
 
-> *"Installed and launched $IOS_SCHEME on iPhone (UDID 2702BB16…)."*
+> *"Installed and launched DatingAIAssistant on iPhone (UDID 2702BB16…)."*
 
 Use the device name from Step 2 so the user knows which phone got it. If they had multiple devices paired, this is the only signal that we picked the right one.
 
 ## Notes
 
 - **Don't shut down or restart the device when done.** The user is mid-test.
-- **Bundle ID `$IOS_BUNDLE_ID`, scheme `$IOS_SCHEME`, team `$IOS_TEAM_ID`** — read from `ios/$IOS_SCHEME.xcodeproj/project.pbxproj`. If any of these change, update this skill.
+- **Bundle ID `com.shivaapps.photoai`, scheme `DatingAIAssistant`, team `C5GK8X5LBQ`** — read from `ios/DatingAIAssistant.xcodeproj/project.pbxproj`. If any of these change, update this skill.
 - **Wi-Fi pairing is one-time per device.** After "Connect via network" is checked in Xcode for a device, it shows up in `devicectl list devices` over either transport for the lifetime of that pairing. The user does not need to keep a USB cable connected.
 - **First-time-on-this-device flow is interactive.** The user has to trust the developer cert in Settings on the phone the first time only. There's no command-line bypass; surface the instruction and stop.
 - **Don't use the Xcode MCP's `BuildProject`** — same reason as the simulator skill: the destination is whatever Xcode last had selected, which is non-deterministic. Use `xcodebuild` with explicit `-destination "generic/platform=iOS"`.
-- **`$IOS_DEVICE_BUILD_CACHE` is intentionally separate from `$IOS_SIM_BUILD_CACHE`** so that running `/simulator` and `/device` back-to-back doesn't force either to do a full SwiftPM resolve.
+- **`/tmp/datingai-device-build` is intentionally separate from `/tmp/datingai-sim-build`** so that running `/simulator` and `/device` back-to-back doesn't force either to do a full SwiftPM resolve.

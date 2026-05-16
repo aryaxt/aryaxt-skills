@@ -5,7 +5,7 @@ description: Build and launch the iOS app on a simulator. Use whenever the user 
 
 # /simulator — build and run the iOS app on a simulator
 
-The iOS app lives at `ios/$IOS_SCHEME.xcodeproj` (scheme `$IOS_SCHEME`, bundle id `$IOS_BUNDLE_ID`). This skill builds for the requested target and launches the app on it.
+The iOS app lives at `ios/DatingAIAssistant.xcodeproj` (scheme `DatingAIAssistant`, bundle id `com.shivaapps.photoai`). This skill builds for the requested target and launches the app on it.
 
 ## Step 1 — parse the target
 
@@ -69,6 +69,30 @@ xcrun simctl boot "$UDID" 2>&1 | grep -v "Unable to boot device in current state
 ```
 
 The grep hides only the "already booted" complaint. Real errors (deleted runtime, corrupt sim) still surface.
+
+## Step 5a — fix worktree saas-template symlink (if applicable)
+
+iOS SPMs from `saas-template` (`Components`, `ErrorReporting`, `AppCheckProvider`, `PushNotifications`, …) are wired in `ios/project.yml` as `path: ../../saas-template/packages/<Name>`. That path resolves from the main repo (`~/Desktop/Repos/DatingAIAssistant/ios/` → `~/Desktop/Repos/saas-template/...`), but **NOT from a worktree** (`.claude/worktrees/<name>/ios/` → `.claude/worktrees/saas-template/...` which doesn't exist).
+
+Symlink the worktree-peer location to the real saas-template before `xcodegen` runs, otherwise it errors with `Invalid local package "Components"` and friends.
+
+```bash
+WORKTREE_ROOT=$(git rev-parse --show-toplevel)
+GIT_COMMON_ABS=$(cd "$WORKTREE_ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+PARENT_REPO=$(dirname "$GIT_COMMON_ABS")
+
+# Only act when (a) we're in a worktree, (b) parent's sibling saas-template exists,
+# (c) worktree-peer symlink is missing
+if [ "$PARENT_REPO" != "$WORKTREE_ROOT" ]; then
+  SAAS_SOURCE="$(dirname "$PARENT_REPO")/saas-template"
+  SAAS_PEER="$(dirname "$WORKTREE_ROOT")/saas-template"
+  if [ -d "$SAAS_SOURCE" ] && [ ! -e "$SAAS_PEER" ]; then
+    ln -s "$SAAS_SOURCE" "$SAAS_PEER"
+  fi
+fi
+```
+
+If `$SAAS_SOURCE` doesn't exist, skip — the user doesn't consume saas-template SPMs and `xcodegen` will fail loudly with a clearer message than we could produce.
 
 ## Step 5 — ensure the Next.js dev server is up on port 3000
 
@@ -156,11 +180,11 @@ Use a stable derived-data path so successive runs hit the cache. Run in backgrou
 
 ```bash
 xcodebuild \
-  -project ios/$IOS_SCHEME.xcodeproj \
-  -scheme $IOS_SCHEME \
+  -project ios/DatingAIAssistant.xcodeproj \
+  -scheme DatingAIAssistant \
   -configuration Debug \
   -destination "platform=iOS Simulator,id=$UDID" \
-  -derivedDataPath $IOS_SIM_BUILD_CACHE \
+  -derivedDataPath /tmp/datingai-sim-build \
   build
 ```
 
@@ -169,10 +193,10 @@ If the build fails, surface the actual error from the log — don't try to "fix"
 ## Step 7 — install and launch
 
 ```bash
-APP=$(find $IOS_SIM_BUILD_CACHE/Build/Products/Debug-iphonesimulator -maxdepth 2 -type d -name "$IOS_SCHEME.app" | head -1)
+APP=$(find /tmp/datingai-sim-build/Build/Products/Debug-iphonesimulator -maxdepth 2 -type d -name "DatingAIAssistant.app" | head -1)
 [ -z "$APP" ] && { echo "Build succeeded but .app not found at expected path"; exit 1; }
 xcrun simctl install "$UDID" "$APP"
-xcrun simctl launch "$UDID" $IOS_BUNDLE_ID
+xcrun simctl launch "$UDID" com.shivaapps.photoai
 ```
 
 `-maxdepth 2` comes before `-name` for portability (GNU `find` requires options first; macOS BSD `find` is flexible but the documented form is options-first).
@@ -181,15 +205,15 @@ xcrun simctl launch "$UDID" $IOS_BUNDLE_ID
 
 One short sentence per target launched. Include the device name so the user knows which sim got it:
 
-> *"Launched $IOS_SCHEME on iPhone 17 Pro (iOS 26.4 simulator)."*
+> *"Launched DatingAIAssistant on iPhone 17 Pro (iOS 26.4 simulator)."*
 
 For `all`, log progress per device as each finishes — users want to see two lines on a 2-build run, not silence then a single message at the end.
 
 ## Notes
 
 - **Don't shut down a booted simulator when done.** The user is mid-test.
-- **Bundle ID is `$IOS_BUNDLE_ID`** — read from `ios/project.yml`'s `PRODUCT_BUNDLE_IDENTIFIER`. If that ever changes, update this skill.
+- **Bundle ID is `com.shivaapps.photoai`** — read from `ios/project.yml`'s `PRODUCT_BUNDLE_IDENTIFIER`. If that ever changes, update this skill.
 - **Mac (Designed for iPad) is intentionally unsupported in this version.** The right destination is `platform=macOS,variant=Designed for iPad`, the build emits to `Debug-iphoneos/`, and `open` *should* launch the resulting bundle as a Mac-runnable app — but that pipeline needs end-to-end verification on this project before being trusted in a one-command skill. Add it in a follow-up after testing.
-- **First build dominates.** SwiftPM resolves Firebase/GoogleSignIn from scratch on a clean derived-data dir. The shared `$IOS_SIM_BUILD_CACHE` dir keeps subsequent runs fast. Note: `/tmp` on macOS is preserved across reboots but purged after 3 days of file inactivity by `periodic`, so a long gap between runs may force a clean rebuild.
+- **First build dominates.** SwiftPM resolves Firebase/GoogleSignIn from scratch on a clean derived-data dir. The shared `/tmp/datingai-sim-build` dir keeps subsequent runs fast. Note: `/tmp` on macOS is preserved across reboots but purged after 3 days of file inactivity by `periodic`, so a long gap between runs may force a clean rebuild.
 - **Don't use the Xcode MCP's `BuildProject`** for this — it builds for whatever destination Xcode last had selected, which isn't deterministic for this skill's targets. Use `xcodebuild` with explicit `-destination`.
 - **Port 3000 is reused when safe, killed when not.** Step 5's decision tree reuses an existing dev server if it's ours and HMR is sufficient (no env/config/middleware changes since it started). It kills + restarts only when the process is foreign, from another worktree, or running against stale env/config. If a future user wants force-restart, add a `--restart-dev` arg parser at Step 1.
