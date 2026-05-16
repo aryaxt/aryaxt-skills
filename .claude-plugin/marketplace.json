@@ -1,0 +1,28 @@
+{
+  "name": "aryaxt",
+  "owner": {
+    "name": "Aryan Ghassemi",
+    "email": "aryaxt@gmail.com"
+  },
+  "metadata": {
+    "description": "Aryan's personal Claude Code plugins. Single-plugin marketplace today — may grow if a second plugin is worth splitting out.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "aryaxt-skills",
+      "description": "Shared Claude Code skills — iOS dev (simulator/device/testflight), web dev (chrome), Firebase debugging (error), ship workflows (doit, create-issue, work-on-issue), and utilities (qa, free-space, decision-council, generate-image). Project-specific values come from each project's scripts/ios-config.sh.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Aryan Ghassemi",
+        "email": "aryaxt@gmail.com"
+      },
+      "homepage": "https://github.com/aryaxt/aryaxt-skills",
+      "repository": "https://github.com/aryaxt/aryaxt-skills",
+      "license": "MIT",
+      "keywords": ["ios", "xcode", "firebase", "saas-template", "personal-workflows"],
+      "category": "development",
+      "source": "."
+    }
+  ]
+}
