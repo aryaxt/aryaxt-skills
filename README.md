@@ -41,6 +41,9 @@ Invoke `aryaxt:simulator` with any args passed by the user.
 | `work-on-issue` | Autonomous loop: read issue → branch → plan → implement → test → PR. |
 | `decision-council` | Spawn 3 adversarial subagents for biased framing problems. |
 | `generate-image` | Generate AI photos via the project's Gemini setup. |
+| `create-project` | Scaffold a new SaaS project from `saas-template`: copy → rename → 16-step Firebase + GitHub + deploy onboarding. **Replaces the deprecated saas-template MCP `create_project` tool.** |
+| `research-idea` | Run a 7-phase market research framework on a business idea before writing code. Forces a GO / NO-GO decision via a scorecard. Run BEFORE building. **Replaces the deprecated saas-template MCP `research_idea` tool.** |
+| `plan-features` | Translate a validated product idea (post `research-idea`) into a per-task implementation plan, prioritized mvp / v1 / v2. **Replaces the deprecated saas-template MCP `plan_features` tool.** |
 
 ## Per-project config
 
