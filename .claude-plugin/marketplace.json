@@ -22,7 +22,7 @@
       "license": "MIT",
       "keywords": ["ios", "xcode", "firebase", "saas-template", "personal-workflows"],
       "category": "development",
-      "source": "."
+      "source": "./"
     }
   ]
 }
