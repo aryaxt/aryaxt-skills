@@ -52,6 +52,28 @@ DEVICE_NAME=$(echo "$MATCH" | awk '{print $1}')
 
 If multiple devices match a fragment, prefer the first one but mention in the final confirmation which one was picked, so the user knows if they meant the other.
 
+## Step 2b — fix worktree saas-template symlink (if applicable)
+
+iOS SPMs from `saas-template` (`Components`, `ErrorReporting`, `AppCheckProvider`, `PushNotifications`, …) are wired in `ios/project.yml` as `path: ../../saas-template/packages/<Name>`. That path resolves from the main repo but **NOT from a worktree** (`.claude/worktrees/<name>/ios/` → `.claude/worktrees/saas-template/...` which doesn't exist).
+
+Symlink the worktree-peer location to the real saas-template before `xcodebuild` runs, otherwise it errors with `Invalid local package "Components"` and friends.
+
+```bash
+WORKTREE_ROOT=$(git rev-parse --show-toplevel)
+GIT_COMMON_ABS=$(cd "$WORKTREE_ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+PARENT_REPO=$(dirname "$GIT_COMMON_ABS")
+
+if [ "$PARENT_REPO" != "$WORKTREE_ROOT" ]; then
+  SAAS_SOURCE="$(dirname "$PARENT_REPO")/saas-template"
+  SAAS_PEER="$(dirname "$WORKTREE_ROOT")/saas-template"
+  if [ -d "$SAAS_SOURCE" ] && [ ! -e "$SAAS_PEER" ]; then
+    ln -s "$SAAS_SOURCE" "$SAAS_PEER"
+  fi
+fi
+```
+
+If `$SAAS_SOURCE` doesn't exist, skip — the user doesn't consume saas-template SPMs and `xcodebuild` will fail loudly with a clearer message than we could produce.
+
 ## Step 3 — build for device
 
 Use a stable derived-data path so successive runs hit the cache. Run in background — first build is 2–4 min, subsequent are 15–45s. Note the build folder is **`Debug-iphoneos`** (not `Debug-iphonesimulator`).

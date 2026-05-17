@@ -637,6 +637,21 @@ Parallel to Step 5.8's `next build` for the web, this is the iOS equivalent. Cat
 
 In any other case (`ios/**/*.swift`, `ios/project.yml` with new source paths, anything touching the SwiftPM Package.swift, target settings, or build phases), **run it**.
 
+### Pre-flight: fix worktree saas-template symlink (if applicable)
+
+`/doit` typically creates a feature branch under `.claude/worktrees/`, so the `../../saas-template/...` SPM paths in `ios/project.yml` don't resolve. Symlink the peer location first (same pattern `/chrome` uses for `.env.local`):
+
+```bash
+WORKTREE_ROOT=$(git rev-parse --show-toplevel)
+GIT_COMMON_ABS=$(cd "$WORKTREE_ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+PARENT_REPO=$(dirname "$GIT_COMMON_ABS")
+if [ "$PARENT_REPO" != "$WORKTREE_ROOT" ]; then
+  SAAS_SOURCE="$(dirname "$PARENT_REPO")/saas-template"
+  SAAS_PEER="$(dirname "$WORKTREE_ROOT")/saas-template"
+  [ -d "$SAAS_SOURCE" ] && [ ! -e "$SAAS_PEER" ] && ln -s "$SAAS_SOURCE" "$SAAS_PEER"
+fi
+```
+
 ### Run
 
 ```bash

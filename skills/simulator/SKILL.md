@@ -150,6 +150,30 @@ If a fresh `npm run dev` was started, **wait for "Ready"** before launching the 
 
 If the dev server fails to come up (missing `.env.local`, dependency drift, port still bound after kill), surface the actual error from its log and stop. Don't try to "fix" it autonomously — the iOS app will just 404 against a dead server and the user will be confused.
 
+## Step 5b — fix worktree saas-template symlink (if applicable)
+
+iOS SPMs from `saas-template` (`Components`, `ErrorReporting`, `AppCheckProvider`, `PushNotifications`, …) are wired in `ios/project.yml` as `path: ../../saas-template/packages/<Name>`. That path resolves from the main repo (`~/Desktop/Repos/<App>/ios/` → `~/Desktop/Repos/saas-template/...`), but **NOT from a worktree** (`.claude/worktrees/<name>/ios/` → `.claude/worktrees/saas-template/...` which doesn't exist).
+
+Symlink the worktree-peer location to the real saas-template before `xcodebuild` runs, otherwise it errors with `Invalid local package "Components"` and friends.
+
+```bash
+WORKTREE_ROOT=$(git rev-parse --show-toplevel)
+GIT_COMMON_ABS=$(cd "$WORKTREE_ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+PARENT_REPO=$(dirname "$GIT_COMMON_ABS")
+
+# Only act when (a) we're in a worktree, (b) parent's sibling saas-template exists,
+# (c) worktree-peer symlink is missing
+if [ "$PARENT_REPO" != "$WORKTREE_ROOT" ]; then
+  SAAS_SOURCE="$(dirname "$PARENT_REPO")/saas-template"
+  SAAS_PEER="$(dirname "$WORKTREE_ROOT")/saas-template"
+  if [ -d "$SAAS_SOURCE" ] && [ ! -e "$SAAS_PEER" ]; then
+    ln -s "$SAAS_SOURCE" "$SAAS_PEER"
+  fi
+fi
+```
+
+If `$SAAS_SOURCE` doesn't exist, skip — the user doesn't consume saas-template SPMs and `xcodebuild` will fail loudly with a clearer message than we could produce.
+
 ## Step 6 — build
 
 Use a stable derived-data path so successive runs hit the cache. Run in background — first build is 2–3 min (SwiftPM resolution), subsequent are 10–30s.
