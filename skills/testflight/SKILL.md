@@ -84,11 +84,11 @@ git push origin main
 
 Capture the resulting commit SHA — `RELEASE_SHA=$(git rev-parse HEAD)` — you'll attach it to the GitHub release.
 
-## Step 3 — archive
+## Step 3 — archive iOS
 
 ```bash
 cd /Users/aryaxt/Desktop/Repos/$IOS_SCHEME/ios
-ARCHIVE_PATH="$HOME/Library/Developer/Xcode/Archives/$IOS_SCHEME-$(date +%Y%m%d-%H%M%S).xcarchive"
+ARCHIVE_PATH="$HOME/Library/Developer/Xcode/Archives/$IOS_SCHEME-ios-$(date +%Y%m%d-%H%M%S).xcarchive"
 
 xcodebuild \
   -project $IOS_SCHEME.xcodeproj \
@@ -104,10 +104,39 @@ Run with `run_in_background: true` and monitor — archives take 5–10 minutes.
 - **Swift package resolution timeout**: rerun, or `rm -rf ~/Library/Developer/Xcode/DerivedData/$IOS_SCHEME-*` and retry
 - **Crashlytics dSYM upload script** failing on missing `GoogleService-Info.plist` — should not happen on `main`
 
-## Step 4 — export IPA
+## Step 3b — archive Mac Catalyst (if applicable)
+
+**Run this step only if `ios/ExportOptions.macOS.plist` exists.** Apps without Mac Catalyst support skip it entirely and proceed to Step 4. Check with:
 
 ```bash
-EXPORT_DIR="$HOME/Library/Developer/Xcode/Archives/export-$(date +%Y%m%d-%H%M%S)"
+test -f ios/ExportOptions.macOS.plist && echo "ship mac too" || echo "ios only"
+```
+
+The Mac archive is a SEPARATE binary (`.app` packaged as `.pkg` for upload) — App Store Connect tracks it as a distinct Build entity under the macOS platform, even though it carries the same `CFBundleVersion` you bumped in Step 2.
+
+```bash
+MAC_ARCHIVE_PATH="$HOME/Library/Developer/Xcode/Archives/$IOS_SCHEME-mac-$(date +%Y%m%d-%H%M%S).xcarchive"
+
+xcodebuild \
+  -project $IOS_SCHEME.xcodeproj \
+  -scheme $IOS_SCHEME \
+  -configuration Release \
+  -destination "generic/platform=macOS,variant=Mac Catalyst" \
+  -archivePath "$MAC_ARCHIVE_PATH" \
+  -allowProvisioningUpdates \
+  archive
+```
+
+`-allowProvisioningUpdates` is **required for the Mac archive but NOT iOS.** On a fresh machine the Mac Catalyst *Development* provisioning profile doesn't exist locally — Apple Developer Portal only has the App Store profile (which `-exportArchive` uses later). The flag lets xcodebuild auto-create the missing dev profile via Apple's signing service on first run. It's a no-op once the dev profile is cached locally.
+
+Same failure modes as iOS, plus:
+- **Embedded extension platform mismatch** — if an iOS-only extension (e.g. a Live Activity widget) tries to embed in the Mac variant: `platformFilter: iOS` is missing on its `dependencies:` entry in `project.yml`. Fix the spec, re-run `xcodegen generate`, retry.
+- **Mac Catalyst App Store profile missing** — `ios/ExportOptions.macOS.plist` references named profiles in Apple Developer Portal. If this is the first Mac upload and the plist still has `REPLACE_WITH_MAC_CATALYST_*` placeholders, stop and follow the "Mac Catalyst — one-time Apple Developer Portal setup" section below.
+
+## Step 4 — export iOS IPA
+
+```bash
+EXPORT_DIR="$HOME/Library/Developer/Xcode/Archives/export-ios-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$EXPORT_DIR"
 
 xcodebuild \
@@ -119,7 +148,22 @@ xcodebuild \
 
 The IPA lands at `$EXPORT_DIR/$IOS_SCHEME.ipa`.
 
-## Step 5 — upload to TestFlight
+## Step 4b — export Mac Catalyst .pkg (if applicable)
+
+```bash
+MAC_EXPORT_DIR="$HOME/Library/Developer/Xcode/Archives/export-mac-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$MAC_EXPORT_DIR"
+
+xcodebuild \
+  -exportArchive \
+  -archivePath "$MAC_ARCHIVE_PATH" \
+  -exportOptionsPlist ExportOptions.macOS.plist \
+  -exportPath "$MAC_EXPORT_DIR"
+```
+
+The Mac binary lands at `$MAC_EXPORT_DIR/$IOS_SCHEME.pkg` (App Store distribution wraps the .app in a .pkg installer).
+
+## Step 5 — upload iOS to TestFlight
 
 ```bash
 xcrun altool --upload-app \
@@ -131,6 +175,18 @@ xcrun altool --upload-app \
 
 `altool` validates and uploads in one shot, ~3–5 minutes. Success returns `No errors uploading...` and an upload UUID. The build then takes another 10–30 minutes server-side to finish processing before it appears in TestFlight (and another wait if export compliance is needed).
 
+## Step 5b — upload Mac Catalyst to TestFlight (if applicable)
+
+```bash
+xcrun altool --upload-app \
+  --type macos \
+  --file "$MAC_EXPORT_DIR/$IOS_SCHEME.pkg" \
+  --apiKey HUGD2M7X2Y \
+  --apiIssuer "<ISSUER_UUID>"
+```
+
+Same Apple-side processing wait (~10–30 min). The Mac build appears under "macOS App" in App Store Connect, separate from the iOS App entry.
+
 If you see:
 - **`Authentication credentials are missing or invalid`** → wrong issuer ID, or `.p8` file moved
 - **`The bundle version must be higher than the previously uploaded version`** → step 2 was skipped or the bump didn't reach Info.plist
@@ -138,10 +194,12 @@ If you see:
 
 ### Clean up the archive and export after a successful upload
 
-`.xcarchive` bundles are 200–500 MB each and `~/Library/Developer/Xcode/Archives/` accumulates them silently — at one bump per day, that's >10 GB/month of dead disk. Once `altool` returned success the archive and export dir are no longer needed: TestFlight has the IPA, dSYMs are already in Crashlytics (Step 3 postBuildScript), and the GitHub tag in Step 7 records the source SHA.
+`.xcarchive` bundles are 200–500 MB each and `~/Library/Developer/Xcode/Archives/` accumulates them silently — at one bump per day, that's >10 GB/month of dead disk. Once `altool` returned success the archive and export dir are no longer needed: TestFlight has the IPA/PKG, dSYMs are already in Crashlytics (Step 3 postBuildScript), and the GitHub tag in Step 7 records the source SHA.
 
 ```bash
 rm -rf -- "${ARCHIVE_PATH:?ARCHIVE_PATH must be set}" "${EXPORT_DIR:?EXPORT_DIR must be set}"
+# Mac variant — only if the Mac archive/export were created in Steps 3b/4b.
+[ -n "${MAC_ARCHIVE_PATH:-}" ] && rm -rf -- "${MAC_ARCHIVE_PATH:?}" "${MAC_EXPORT_DIR:?}"
 ```
 
 The `${VAR:?...}` form aborts (instead of degrading to `rm -rf ""`) if either variable was never assigned in this shell session, and the `--` end-of-options sentinel keeps a path that begins with `-` from being parsed as a flag. Only run this after `altool` printed `No errors uploading…`. If the upload failed, keep the archive — re-exporting from a fresh archive takes 5–10 minutes.
@@ -151,8 +209,13 @@ The `${VAR:?...}` form aborts (instead of degrading to `rm -rf ""`) if either va
 After the upload, run the assigner — it polls App Store Connect until the build reaches `VALID`, POSTs the build to every external beta group on the app, **then submits the build for beta app review**.
 
 ```bash
-node scripts/asc-assign-build.mjs "$NEW_BUILD"
+node scripts/asc-assign-build.mjs "$NEW_BUILD" --platform=IOS
+
+# If you shipped Mac Catalyst in Steps 3b/4b/5b too:
+test -f ios/ExportOptions.macOS.plist && node scripts/asc-assign-build.mjs "$NEW_BUILD" --platform=MAC_OS
 ```
+
+Run the iOS invocation first, then the Mac invocation. They poll independently — iOS typically reaches `VALID` ~10 min before Mac, so back-to-back execution is fine (the Mac poll may sit at `PROCESSING` for a while, that's normal).
 
 **Why the submit step matters (and why the API is not the UI):** assigning a build to an external group is *not* the same as submitting it for review. Without an explicit `POST /v1/betaAppReviewSubmissions`, the build sits at "Ready to Submit" with the yellow clock icon forever — external testers never see it. The App Store Connect *website* auto-creates the submission when you add a build to a group through the UI, which is why the manual workaround "delete the build and re-add it through ASC" used to work; the API has no such auto-step. The script now does both.
 
@@ -235,13 +298,41 @@ Notes:
 
 After the upload command returns success:
 1. Tell the user the build number that shipped (e.g. "Build 20260426 uploaded")
-2. Note that App Store Connect needs ~10–30 min to process before testers see it
-3. Confirm that the build was assigned to "main" (internal) and "External testers" groups and that testers will be notified automatically
-4. Link to [appstoreconnect.apple.com/apps](https://appstoreconnect.apple.com/apps) so they can watch processing
+2. If you shipped both platforms, say so explicitly: "iOS + Mac Catalyst builds 20260426 uploaded"
+3. Note that App Store Connect needs ~10–30 min to process before testers see it (Mac usually trails iOS by 5–10 min)
+4. Confirm that the build was assigned to "main" (internal) and "External testers" groups and that testers will be notified automatically
+5. Link to [appstoreconnect.apple.com/apps](https://appstoreconnect.apple.com/apps) so they can watch processing
+
+## Mac Catalyst — one-time per-Mac setup
+
+Apps that ship to both iOS and macOS TestFlight need two things that iOS-only apps don't:
+1. A **Mac Installer Distribution** certificate (for signing the `.pkg` installer)
+2. **Mac Catalyst App Store** provisioning profiles for every bundle id (one per signed binary)
+
+The `scripts/setup-mac-signing.mjs` script automates both via the App Store Connect API. Run it once per Mac that needs to ship Mac Catalyst builds:
+
+```bash
+# Step A: enable Mac Catalyst on each App ID in the browser (one-time, per app):
+#   developer.apple.com/account/resources/identifiers → open each bundle id
+#   listed in ios/ExportOptions.macOS.plist → tick "Mac Catalyst" → Save.
+#   Pick "Use existing Mac App ID" if prompted.
+#
+# Step B: run the setup script. Creates the Mac Installer Distribution cert
+# (if missing), imports it into the login keychain, then creates + downloads
+# the Mac Catalyst App Store profiles for every bundle id in `wanted`.
+node scripts/setup-mac-signing.mjs
+```
+
+The script is idempotent. Re-running on a Mac that already has the cert + profiles is a no-op (it just re-downloads the .mobileprovision files into `~/Library/MobileDevice/Provisioning Profiles/`, which is harmless).
+
+The script uses the same `APPLE_ASC_*` credentials from `.env.local` that `asc-assign-build.mjs` does.
+
+After the script runs once, `/testflight` can ship to both platforms without further setup. If you add a new App ID to the project (e.g. a new extension), edit the `wanted` array at the top of `scripts/setup-mac-signing.mjs` to include it, then re-run.
 
 ## Things to watch for
 
 - **Never push to main from a feature branch as part of this flow.** The build-number commit is allowed because it's a chore commit on main, but per `CLAUDE.md` the user requires PR review for everything else. If there are unpushed feature commits, surface them and ask.
 - **dSYM upload to Crashlytics** runs as a postBuildScript inside the archive — verify in the build log it succeeded (look for "Successfully uploaded Crashlytics dSYMs"). If it fails, Crashlytics will show "missing dSYMs" in the dashboard and you can manually upload from the `.xcarchive/dSYMs/` directory later.
 - **Don't `xcodebuild clean` before archiving** — it forces a full SwiftPM re-resolution that can take 10+ extra minutes for the Firebase SDK chain. Only clean if you're debugging a stale-build issue.
-- **Build-number monotonicity is per `CFBundleShortVersionString`**: e.g. for marketing version "1.0" all builds must be strictly increasing integers. If you bump to "1.1", the build counter resets is allowed but most teams keep it monotonic forever to avoid confusion.
+- **Build-number monotonicity is per `CFBundleShortVersionString` AND per platform.** Within iOS, all builds for marketing version "1.0" must be strictly increasing. Within macOS, same rule independently. iOS and Mac builds with the same `CFBundleVersion` are fine — they live under separate Build entities in App Store Connect.
+- **Mac builds take longer to process** than iOS — Apple's macOS notarization step adds 5–15 min on top of the standard processing. Don't panic if Step 6's Mac poll sits at `PROCESSING` after the iOS one reached `VALID`.
