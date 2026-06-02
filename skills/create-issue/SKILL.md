@@ -54,7 +54,7 @@ Suggested approach based on codebase research. Include:
 
 ### 3. Pick labels
 
-Apply **one label from each axis that fits** (type is required; the others only if relevant). Two to four labels is typical.
+Apply **one label from each axis that fits** (type is required; platform is required whenever client code is touched; the rest only if relevant). Three to five labels is typical.
 
 **Type** (required, pick 1):
 | Label | When |
@@ -64,11 +64,18 @@ Apply **one label from each axis that fits** (type is required; the others only 
 | `chore` | Maintenance, deps, cleanup, refactor |
 | `enhancement` | Improvement to existing capability (not a new feature) |
 
-**Surface** (pick 0–2 — where the work lives):
+**Platform** (REQUIRED — apply EVERY platform the work touches; there can be more than one):
 | Label | When |
 |-------|------|
 | `ios` | iOS app code (`ios/`) |
+| `android` | Native Android app code (`android/`) |
 | `web` | Web / Next.js client (`src/app/`, `src/components/`) |
+
+ALWAYS tag the platform(s) a ticket affects — never leave a client-facing ticket platform-less. A cross-platform feature (e.g. "add a duration picker" that ships on iOS, Android, and web) gets **all three** of `ios`, `android`, `web`. A bug scoped to one client gets just that one. A purely server-side change with no client work gets **no** platform label (use the Area labels instead) — but if the change is *about* a specific client (e.g. server telemetry mislabeling Android, a route a single client calls), tag that client too. The mobile-first rule still holds: an iOS-lead feature with web/Android follow-ups can be one ticket tagged all three, or split with the follow-ups tagged their platform — but the platform tag must always reflect reality.
+
+**Area** (pick 0–2 — the functional domain, orthogonal to platform):
+| Label | When |
+|-------|------|
 | `ai` | AI provider, prompts, generation, training |
 | `backend` | Server-side logic / API routes (not AI, not infra) |
 | `infra` | Firebase, App Hosting, CI, deploy, build |

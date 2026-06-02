@@ -1,21 +1,26 @@
 ---
 name: simulator
-description: Build and launch the iOS app on a simulator. Use whenever the user types /simulator, says "run on simulator", "test on simulator", "fire it up on iphone/ipad", "launch the app on sim", "let me test on iphone", or any variant of "show it to me on iphone/ipad". Optional positional arg: iphone (default), ipad, or all. Opens Simulator.app first if it isn't already running. Mac (Designed for iPad) target isn't wired up yet — tell the user to use iphone or ipad if they ask for it.
+description: Build and launch the iOS app on a simulator, or the Android app on an emulator. Use whenever the user types /simulator, says "run on simulator", "test on simulator", "fire it up on iphone/ipad", "run on android", "launch on the emulator", "let me test on iphone", or any variant of "show it to me on iphone/ipad/android". Optional positional arg: iphone (default), ipad, all, or android. Opens Simulator.app / boots the Android emulator first if it isn't already running. Mac (Designed for iPad) target isn't wired up yet — tell the user to use iphone, ipad, or android if they ask for it.
 ---
 
-# /simulator — build and run the iOS app on a simulator
+# /simulator — build and run the app on a simulator (iOS) or emulator (Android)
 
-The iOS app lives at `ios/DatingAIAssistant.xcodeproj` (scheme `DatingAIAssistant`, bundle id `com.shivaapps.photoai`). This skill builds for the requested target and launches the app on it.
+The iOS app lives at `ios/DatingAIAssistant.xcodeproj` (scheme `DatingAIAssistant`, bundle id `com.shivaapps.photoai`). The Android app lives at `android/` (single `:app` module, applicationId `com.shivaapps.photoai`). This skill builds for the requested target and launches the app on it.
+
+Per-project values are sourced from the project's config shims — `scripts/ios-config.sh` for iOS, `scripts/android-config.sh` for Android — so this skill stays project-agnostic.
 
 ## Step 1 — parse the target
 
 Argument can be:
-- `iphone` (default if none) — latest available iPhone simulator
-- `ipad` — latest available iPad simulator
-- `all` — runs both sequentially (not parallel; they share derived data and would race)
-- `mac` — **not yet supported.** Tell the user it's a follow-up and ask them to pick `iphone` or `ipad`. (The "Designed for iPad" pipeline needs end-to-end verification before we wire it up.)
+- `iphone` (default if none) — latest available iPhone simulator → **iOS path** (Steps 2–8 below)
+- `ipad` — latest available iPad simulator → **iOS path**
+- `all` — runs both iPhone and iPad sequentially (not parallel; they share derived data and would race) → **iOS path**
+- `android` (or `emulator`) — latest available Android emulator → **Android path** (jump to the "Android" section near the end of this skill)
+- `mac` — **not yet supported.** Tell the user it's a follow-up and ask them to pick `iphone`, `ipad`, or `android`. (The "Designed for iPad" pipeline needs end-to-end verification before we wire it up.)
 
-Anything else: treat as a literal simulator device name and pass through to the picker as the explicit name.
+Anything else: treat as a literal device/AVD name. If it looks like an Android AVD (matches `adb`/`emulator -list-avds`), take the Android path; otherwise pass through to the iOS simulator picker as the explicit name.
+
+> **Android prerequisite:** the Android path only works once the `android/` Gradle project exists (Foundation layer — see `docs/superpowers/specs/2026-06-01-android-port-foundation-design.md`). If `android/` is absent, tell the user the Android app hasn't been scaffolded yet and stop — don't try to build a project that isn't there.
 
 ## Step 2 — pick the simulator UDID
 
@@ -241,3 +246,91 @@ For `all`, log progress per device as each finishes — users want to see two li
 - **First build dominates.** SwiftPM resolves Firebase/GoogleSignIn from scratch on a clean derived-data dir. The shared `/tmp/datingai-sim-build` dir keeps subsequent runs fast. Note: `/tmp` on macOS is preserved across reboots but purged after 3 days of file inactivity by `periodic`, so a long gap between runs may force a clean rebuild.
 - **Don't use the Xcode MCP's `BuildProject`** for this — it builds for whatever destination Xcode last had selected, which isn't deterministic for this skill's targets. Use `xcodebuild` with explicit `-destination`.
 - **Port 3000 is reused when safe, killed when not.** Step 5's decision tree reuses an existing dev server if it's ours and HMR is sufficient (no env/config/middleware changes since it started). It kills + restarts only when the process is foreign, from another worktree, or running against stale env/config. If a future user wants force-restart, add a `--restart-dev` arg parser at Step 1.
+
+---
+
+# Android — build and run the app on an emulator
+
+Reached when Step 1 parsed the target as `android` / `emulator` (or an explicit AVD name). The structure mirrors the iOS path: pick a device, boot it, ensure the dev server, build, install, launch, confirm. Source the Android config first:
+
+```bash
+source scripts/android-config.sh   # ANDROID_APPLICATION_ID, ANDROID_AVD_PREFERRED, etc.
+test -d "$ANDROID_PROJECT_DIR" || { echo "android/ not scaffolded yet — Foundation layer hasn't landed"; exit 1; }
+```
+
+## A1 — pick the emulator (AVD)
+
+Try the preferred AVD names in order; fall back to any installed AVD.
+
+```bash
+AVDS=$(emulator -list-avds 2>/dev/null)
+AVD=""
+for name in $ANDROID_AVD_PREFERRED; do
+  echo "$AVDS" | /usr/bin/grep -qx "$name" && { AVD="$name"; break; }
+done
+# Fallback: first available AVD
+[ -z "$AVD" ] && AVD=$(echo "$AVDS" | head -1)
+```
+
+If `$AVD` is empty: surface "no Android emulator (AVD) installed — create one via Android Studio → Device Manager, or `sdkmanager` + `avdmanager`" and stop. Don't fall back to a physical device (that's `/device`'s job).
+
+## A2 — boot the emulator (if not already running)
+
+```bash
+# Is an emulator already booted?
+BOOTED=$(adb devices | /usr/bin/grep -E "emulator-[0-9]+\s+device" | head -1 | awk '{print $1}')
+if [ -z "$BOOTED" ]; then
+  # Boot headless-but-windowed in the background; emulator command does not return.
+  emulator -avd "$AVD" -netdelay none -netspeed full >/tmp/android-emulator.log 2>&1 &
+  # Wait for full boot (sys.boot_completed=1), up to ~90s.
+  adb wait-for-device
+  for _ in $(seq 1 45); do
+    [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
+    sleep 2
+  done
+fi
+```
+
+If the emulator never reports `boot_completed`, surface the tail of `/tmp/android-emulator.log` and stop (common causes: no HAXM/Hypervisor, corrupt AVD, no disk).
+
+## A3 — ensure the Next.js dev server is up on port 3000
+
+Same decision tree as the iOS path's **Step 5** (reuse if ours + HMR-sufficient, kill + restart if foreign / wrong-worktree / stale-env). Apply it verbatim.
+
+**The one Android difference:** debug Android builds reach the host's dev server at **`http://10.0.2.2:3000`**, not `localhost:3000` — `10.0.2.2` is the emulator's alias for the host loopback. This is wired in `AppEnvironment.kt` (`local` case); the dev server itself still binds `localhost:3000` on the host, so the reuse/restart logic is unchanged. (A physical device over `/device` would need reverse-tethering — out of scope here.)
+
+If the dev server fails to come up, surface its log and stop — the Android app will just fail every request against a dead server.
+
+## A4 — build + install (Gradle)
+
+Use Gradle's `installDebug`, which assembles the debug APK and installs it on the connected emulator in one step. Run in the background — first build resolves the whole dependency graph (2–4 min); subsequent builds are 15–40s thanks to Gradle's build cache.
+
+```bash
+cd "$ANDROID_PROJECT_DIR"
+./gradlew :"$ANDROID_MODULE":installDebug 2>&1 | tail -20
+cd -
+```
+
+If the build fails, surface the actual Gradle error — don't try to "fix" it without showing the user. Common failures: missing `google-services.json` (Firebase not wired), SDK/JDK version mismatch, or a real Kotlin compile error from recent changes. **Never pipe the build to `tail` in a way that hides `BUILD FAILED`** — check the exit status and surface the failure prominently (same rule as the iOS build).
+
+## A5 — launch
+
+```bash
+source scripts/android-config.sh
+# Launch the main launcher activity of the installed package.
+adb shell monkey -p "$ANDROID_APPLICATION_ID" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+```
+
+## A6 — confirm
+
+One short sentence naming the AVD:
+
+> *"Launched DatingAIAssistant on the Android emulator (Pixel 8, API 35)."*
+
+## Android notes
+
+- **Don't shut down a booted emulator when done** — the user is mid-test (same rule as iOS sims).
+- **applicationId is `com.shivaapps.photoai`** — read from `scripts/android-config.sh` (`ANDROID_APPLICATION_ID`). Mirrors the iOS bundle id.
+- **`10.0.2.2`, not `localhost`** — the single most common "why is the Android app broken?" gotcha. It's the emulator's host-loopback alias and lives in `AppEnvironment.kt`.
+- **No worktree saas-template symlink step** — Android consumes no saas-template SPMs (the Android `:app` module is self-contained; SPM functionality is reimplemented in-module per the parity spec). The iOS-only Steps 5a/5b do not apply.
+- **Gradle build cache is global** (`~/.gradle/caches` + `android/.gradle`), so there's no per-skill `/tmp` cache dir to manage like iOS's derived-data path.
