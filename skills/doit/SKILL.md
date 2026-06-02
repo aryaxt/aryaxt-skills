@@ -64,6 +64,70 @@ Write the PR body using this template — pull details from the **current conver
 
 Good PR descriptions answer: *what*, *why*, *how tested*, and *what to watch out for*. Sparse descriptions are not acceptable.
 
+## Step 3.5 — Backward compatibility check (before review)
+
+🚨 **The app is live in production.** Older iOS app binaries that real users have installed can't be force-updated, and persisted Firestore docs from old clients keep being read by every new release. Per AGENTS.md "🚨 EXTREMELY IMPORTANT — production is live, no breaking changes", any diff that breaks the existing server contract or persisted-data shape must be flagged here and renegotiated with the user — **not silently shimmed away with `if (newField)` branches**.
+
+Scan the diff for the surfaces that have live-client implications:
+
+```bash
+DIFF_FILES=$(git diff origin/main..HEAD --name-only)
+
+# Server contract — API routes, services that build response payloads, shared DTOs
+CONTRACT_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E '^src/app/api/.*route\.ts$|^src/lib/services/|^src/lib/ai/providers/|^src/types/' || true)
+
+# Persisted data — rules, indexes, and any code with a Firestore write call
+RULES_INDEX_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E '^(firestore|storage)\.(rules|indexes\.json)$' || true)
+WRITE_DIFF=$(git diff origin/main..HEAD -G "addDoc|setDoc|updateDoc|collection\(|doc\(|Firestore\.firestore|db\.collection" --name-only || true)
+
+# iOS↔server DTOs — Swift models that mirror server JSON shapes
+IOS_DTO_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E '^ios/[^/]+/Models/' || true)
+
+# Android↔server DTOs — Kotlin @Serializable data classes that mirror server JSON shapes
+ANDROID_DTO_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E '^android/.*/data/models/' || true)
+
+# Money surfaces — IAP products, credit grants, App Store webhook handling
+MONEY_SHAPE_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E 'iap-products|credit-service|apple-notifications|webhook|refund' || true)
+```
+
+If every variable is empty, skip this step. Otherwise classify each hunk:
+
+| Change | Verdict |
+|---|---|
+| Renamed/removed a field on an existing Firestore doc that older iOS builds read or write | **Breaking** |
+| Renamed/removed/retyped a field in an HTTP API request or response that older iOS builds send/parse | **Breaking** |
+| Removed or renamed an API route the live iOS app calls | **Breaking** |
+| Tightened input validation on an existing route in a way that rejects payloads the old iOS client still sends | **Breaking** |
+| Renamed/removed an analytics event the live iOS app emits | **Breaking** |
+| Changed IAP product IDs, App Store webhook handling, or per-product credit grants | **Breaking** (money + entitlement implications) |
+| Added a new *optional* field to a request, response, or Firestore doc | Not breaking |
+| Added a new API route, new analytics event, or new enum value clients treat as unknown gracefully | Not breaking |
+| Pure UI / internal refactor with no contract surface | Not breaking |
+| Server-only change with an iOS counterpart in the same PR | Not breaking ONLY if the iOS change has already shipped to production AND the minimum-supported-build floor is raised AND the PR description states this explicitly |
+
+**If you find ANY Breaking row** — STOP. Do NOT auto-fix by adding `if (newField)` shims or "accept both shapes forever" fallbacks. Surface a large, unmissable alert and wait for the user:
+
+```
+⛔️⛔️⛔️ BREAKING CHANGE DETECTED ⛔️⛔️⛔️
+
+File:line      : <path>:<line>
+What's breaking: <exact field / route / shape change>
+Who it breaks  : <e.g. iOS builds < 1.x.y in the App Store; existing users/{uid}/photos docs; in-flight web sessions>
+Why a quick conditional shim is NOT the answer:
+  - <e.g. compounds versioning debt forever — every future change has to carry the branch>
+  - <e.g. doesn't help iOS clients reading the renamed Firestore field — they still get nil>
+
+How would you like to proceed?
+  1) Ship anyway — forced-update release is queued / I accept the breakage
+  2) Defer until the next forced-update release (re-scope the PR)
+  3) Design a real migration (additive field → dual-write → backfill → dual-read → cut over with a kill date)
+  4) Re-scope the change to be purely additive
+```
+
+Once the user picks a path, record the decision in the PR description's `## Notes` section — and if a migration was chosen, include the dual-write / dual-read / cut-over plan with a stated kill date.
+
+If everything classifies as **Not breaking**, state that explicitly in the PR description's `## Notes` ("Backward-compatible: <one-line reason>") and continue to Step 3.6. Silent compatibility claims are how regressions ship — the **Backward compatibility** reviewer agent in Step 4 will look for this note.
+
 ## Step 3.6 — Admin surface check (before review)
 
 Approaching production: avoid creating data or operational state that nobody can inspect.
@@ -82,16 +146,20 @@ Ask one question of the diff:
 
 ## Step 3.7 — Cross-platform parity check (before review)
 
-Per AGENTS.md "Cross-Platform Parity" and the project's mobile-first convention: user-facing features must reach every platform they belong on, with the same naming, same content, same server contract. Drift starts when a feature ships on iOS and "we'll do web later" silently rots.
+Per AGENTS.md "Cross-Platform Parity" and the project's mobile-first convention: user-facing features must reach every platform they belong on — **web, iOS, and Android** — with the same naming, same content, same server contract. Drift starts when a feature ships on iOS and "we'll do web/Android later" silently rots.
+
+**iOS ↔ Android structural parity:** the Android app is a 1:1 native mirror of the iOS app (see `docs/features/android-parity.md`). When a change touches an iOS file that has an Android counterpart (or vice-versa), the same logic belongs on both — parity is enforced at the server-contract level, and the file structure mirrors (`ios/.../Views/Foo.swift` ↔ `android/.../ui/.../FooScreen.kt`, `ViewModels/FooViewModel.swift` ↔ `viewmodels/FooViewModel.kt`). Per the project's mobile-first ordering, iOS still leads; Android follows feature-by-feature.
 
 Classify the change:
 
 | Type | Action |
 |---|---|
 | Bug fix or refactor scoped to one platform | Fine — single-platform is correct. |
-| New user-facing feature on iOS only (project is mobile-first) | iOS-first is correct. **But before merge**, file a follow-up GitHub issue tracking the web counterpart, with the iOS PR linked. Include slot IDs, scene IDs, copy strings, and the server contract so web doesn't drift. |
+| New user-facing feature on iOS only (project is mobile-first) | iOS-first is correct. **But before merge**, file follow-up GitHub issue(s) tracking the **web AND Android** counterparts, with the iOS PR linked. Include slot IDs, scene IDs, copy strings, and the server contract so the other platforms don't drift. |
 | New user-facing feature on web only | Justify — usually this is wrong direction per mobile-first. Ask the user before merging unless the feature is web-native (admin, marketing, onboarding email landing, etc.). |
-| Server change (new field, new endpoint, new behavior) without matching client changes | Confirm both clients can consume the new contract — or that the change is purely additive and backwards-compatible. |
+| New user-facing feature on Android only | Justify — Android follows iOS, it doesn't lead. Almost always the iOS version should exist first. Ask the user unless this is an explicit Android-port catch-up of an already-shipped iOS feature. |
+| A feature changed on iOS that has an Android counterpart (or vice-versa) | The change should land on both — same logic, mirrored file. If only one side is in the diff, either include the other or file a tracking issue and say so explicitly in the PR. |
+| Server change (new field, new endpoint, new behavior) without matching client changes | Confirm all clients (web, iOS, Android) can consume the new contract — or that the change is purely additive and backwards-compatible. |
 | Hardcoded catalogue (slots, scenes, copy) duplicated across platforms | Verify the `KEEP IN SYNC WITH <other-platform-path>` comment exists per AGENTS.md. Long-term these should move server-side. |
 
 **Don't silently diverge.** If the change is intentionally not shipping cross-platform, say so in the PR description so a future reviewer doesn't try to "fix" the missing platform.
@@ -189,6 +257,13 @@ REMOVED_FILES=$(git diff origin/main..HEAD --diff-filter=D --name-only || true)
 # shipped a correct, secure, well-tested signed-URL design that forced a
 # blocking /api/media/sign round-trip per gallery cell and regressed load.
 HOT_PATH_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E '^src/app/\(main\)/dashboard/|^src/components/(gallery|editor)/|^ios/[^/]+/Views/Dashboard/|^ios/[^/]+/Views/Shared/CachedAsyncImage\.swift|^ios/[^/]+/Services/ImageCache\.swift|^src/app/layout\.tsx$' || true)
+
+# Backward-compat surfaces — server contract, Firestore schema/rules/indexes,
+# iOS DTOs, IAP product / credit / webhook shape. The app is live in production;
+# a renamed field or removed route silently strands installed iOS clients.
+# Mirrors Step 3.5's classification — this auto-escalator guarantees the
+# Backward compatibility agent runs even if Step 3.5 was skipped or misjudged.
+BACKCOMPAT_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E '^src/app/api/.*route\.ts$|^src/lib/services/|^src/lib/ai/providers/|^src/types/|^(firestore|storage)\.(rules|indexes\.json)$|^ios/[^/]+/Models/|^android/.*/data/models/|iap-products|credit-service|apple-notifications|webhook|refund' || true)
 ```
 
 Plus the existing pre-flights below — `SCHEMA_DIFF`, `RULES_DIFF`, `ADMIN_ROUTE_DIFF`, `NEW_ROUTES` — any non-empty result forces the full fleet.
@@ -202,6 +277,7 @@ Plus the existing pre-flights below — `SCHEMA_DIFF`, `RULES_DIFF`, `ADMIN_ROUT
 | `INFRA_DIFF` non-empty | Broken builds, leaked secrets, wrong indexes in production. |
 | `REMOVED_FILES` non-empty and not pure cleanup | Removal regressions are silent — no test exercises the gone code. |
 | `HOT_PATH_DIFF` non-empty | Touches a rendering hot path (gallery, editor, launch, image-load layer). A latency / degradation regression here is the PR #402 class — it must get the full fleet, never intent-only. |
+| `BACKCOMPAT_DIFF` non-empty | Production is live with older iOS binaries in the App Store. A contract / schema / DTO change shipped silently strands installed clients on a contract that no longer exists, and corrupts persisted docs. AGENTS.md "🚨 EXTREMELY IMPORTANT — production is live, no breaking changes" forbids the silent path. |
 
 ### Anti-rationalization checklist (before going intent-only)
 
@@ -261,8 +337,8 @@ Spawn these agents simultaneously:
 | **Intent & approach** | Does this change do the *right thing*? Step back from line-level review and ask: (1) What problem is this solving — articulate it back in one sentence from reading the diff + PR description + (if provided) the original user request. (2) Does the implementation actually solve that problem, or does it solve a near-but-different problem? (3) Is there a simpler / more obvious approach the codebase already has? (look for existing utilities/services/patterns the change should have used instead of inventing new ones). (4) Did the change creep beyond what was asked? (5) Does the architectural choice fit existing patterns in this repo, or does it introduce a parallel way of doing something already done elsewhere? This is the *only* agent that reads the user's original intent — every other agent assumes the change is conceptually correct. Findings here override everything else: a perfectly-coded change that solves the wrong problem is still wrong. |
 | **Code quality** | Naming, readability, DRY, YAGNI, unnecessary complexity |
 | **Security** | Injection, auth bypasses, secrets exposure, input validation gaps. **Admin-route auth specifically:** any new or modified route under `src/app/api/admin/**`, or any route outside `/api/admin/*` that performs an admin-only action (force-end a job, mutate config, view another user's data, refund/adjust credits), must (1) call `verifyAuthHeader` + `isAdmin` from `src/lib/firebase/auth-helpers.ts` and return 401/403 on failure, AND (2) be listed in `src/__tests__/security/admin-routes-manifest.ts` so the behavioral test exercises it. Missing either is **Critical** — the manifest gap lets the architectural invariant test pass vacuously. |
-| **Separation of concerns** | Business logic leaking into UI/routes, God objects, mixed responsibilities, code structured in a way that makes it untestable (hidden dependencies, untyped boundaries, side effects in constructors) |
 | **Anti-patterns** | Does the diff use a forbidden primitive where this repo mandates an established abstraction, or put vendor/provider-specific branching in the wrong layer? The authoritative list lives in `CLAUDE.md` + `AGENTS.md` (+ the saas-template `template/AGENTS.md`) — **read them, they evolve**; the concrete checks below are the high-value catches as of writing, not the whole list. (1) **Vendor/provider branching in the wrong layer** — `if (provider === "x")` / `if (model === "astria")` / `if generationModel == ...` style branches in UI, route handlers, or client (iOS/web) code; this belongs in the AI provider factory (`src/lib/ai/providers/`), never the caller (Pluggable Provider + Thin Client). This is the exact class that slips past every other agent — a conditional keyed on a vendor/provider/model name *outside the factory* is the tell. (2) **Backward-compat shims** — `if (oldFormat)` branches, renamed-unused `_vars`, types re-exported only to preserve a removed symbol, `// removed`-style tombstone comments. (3) **Design tokens** — hardcoded Tailwind color classes (`bg-gray-900`, `text-blue-400`) instead of the semantic tokens in `globals.css`. (4) **iOS haptics** — instantiating `UIImpactFeedbackGenerator` / `UINotificationFeedbackGenerator` / `UISelectionFeedbackGenerator` directly instead of the `Haptics` helper. (5) **iOS modals** — `.sheet` / `.fullScreenCover` / `.popover` directly instead of `.adaptiveModal`. (6) **Web confirmations** — `window.confirm()` / `alert()` instead of `ConfirmDialog` + `useConfirm`. (7) **Web on/off & selection** — raw `<input type="checkbox">` instead of the `Toggle` component. (8) **Duplicated AI logic** — copy-pasted quality-check / prompt-enhance / generate code instead of the shared `src/lib/ai/` modules. (9) **Manual Xcode project edits** — hand-edited `project.pbxproj`, a target `Info.plist`, or an `.xcscheme` instead of lifting the setting into `project.yml` (silently wiped on the next `xcodegen generate`). (10) **Reinventing a packaged capability** — building in-app what an SPM/NPM in the Module-dependencies table already provides. Distinct from *Separation of concerns* ("is logic in the right kind of place?") and *Root cause* ("is this a hack hiding a bug?") — this agent asks "did you bypass an abstraction the project explicitly mandates?" |
+| **Separation of concerns** | Business logic leaking into UI/routes, God objects, mixed responsibilities, code structured in a way that makes it untestable (hidden dependencies, untyped boundaries, side effects in constructors) |
 | **Simplicity** | Over-engineering, premature abstraction, code that could be half the size |
 | **Tests** | Missing tests entirely for new logic (not just coverage gaps); branches/edge cases not exercised; tests that pass even if the logic breaks; rules tests missing when `firestore.rules` / `storage.rules` changed |
 | **Root cause** | Hacks vs. real fixes — band-aids that mask the underlying bug, `try/catch` that swallows errors silently, special-cases for one weird input instead of fixing the type/contract, commented-out code left behind, `// HACK` / `// FIXME` comments, magic constants that should be config, "works for now" shims. Each finding must name the symptom AND the root cause that's being papered over. |
@@ -271,6 +347,7 @@ Spawn these agents simultaneously:
 | **Data design** *(only if `SCHEMA_DIFF` non-empty)* | (1) Firestore conventions: collection names plural+camelCase, fields camelCase, no nested-map abuse where a subcollection fits, timestamps as `Timestamp` not strings, IDs as strings not numbers, no boolean flags that should be enums. (2) Read/write patterns scale: no unbounded subcollections under hot docs, no queries that would force a fanout index, batches/transactions used where consistency matters. (3) **Rules + rules tests** added per CLAUDE.md (field-level whitelists for client-writable docs, server-only collections set `allow read, write: if false`). (4) **Migration/cleanup**: if fields were renamed or removed, is there a backfill or cleanup script? Are old docs left as garbage? (5) Indexes declared in `firestore.indexes.json` for new composite queries. |
 | **Analytics / tracking** | New user-facing action shipped without an analytics event (web: `Analytics.*` from `src/lib/firebase/analytics.ts`; iOS: `Analytics.logEvent` via `ios/.../Services/AnalyticsService.swift`). Existing event names/params changed in a way that breaks dashboards/funnels. PII (email, prompts, user IDs beyond what we already log) accidentally being sent as event params. Same event firing twice on the same action (silent metric inflation). Event names inconsistent with existing convention (snake_case in iOS calls, see `photo_generated` / `edit_applied` / `model_training_started`). |
 | **Credits / billing** | Any new code path that calls AI generation, video generation, model training, or any other paid action — does it go through `useCredit` / `hasCredits` from `src/lib/services/credit-service.ts` (or `getVideoCreditCost` for video)? Server route handlers must check credits *before* the paid call; refund (`addCredits`) on failure to avoid silent revenue leak. Conversely: code that grants credits (`addCredits`, `addCreditsInTransaction`) outside of the IAP/webhook/admin flows is a giveaway bug. Changes to the IAP receipt / webhook handlers, App Store Connect notifications, or refund paths warrant **Critical** scrutiny — these touch money directly. If the diff *should not* affect credits (e.g. a pure UI refactor) and yet touches any credit-service call site, flag it. |
+| **Backward compatibility** *(only if `BACKCOMPAT_DIFF` non-empty)* | The app is live in production with older iOS builds in the App Store (and, once shipped, older Android builds on Play) that cannot be force-updated. (1) Does any hunk rename, remove, or retype a field on an existing Firestore doc, HTTP API request/response, iOS DTO, Android DTO, IAP product, or webhook payload? (2) Does it remove/rename a route the live iOS app calls or an analytics event it emits? (3) Does it tighten existing validation in a way that rejects payloads the old iOS client still sends? (4) Did the author claim "additive" but actually change the *type* of an existing field, add a *required* field without a default, or promote an optional field to required? (5) Is there evidence the change was made backwards-compatibly on purpose — PR description explicitly says so, dual-write/dual-read pattern present, default values supplied, version-gated branches carry a stated kill date — or did it slip through silently? **Don't reward a `if (oldFormat) ... else ...` shim as a fix** — flag it as debt; the right answer is usually a real migration with a kill date or a deferral until the next forced-update release. Any breaking change found that *isn't* explicitly documented as accepted in the PR description = **Critical** — do not merge; renegotiate with the user per AGENTS.md "🚨 EXTREMELY IMPORTANT — production is live, no breaking changes". |
 
 Each agent receives:
 - The full git diff for the PR
@@ -316,8 +393,9 @@ Do not comment on naming, security, tests, etc. — other agents cover those.
 - *Data design:* missing rules or rules tests on a new client-writable collection/field = **Critical** (CLAUDE.md says so). Missing migration for a removed field = **Critical** if old docs would silently break a query; **Important** otherwise. Naming/convention nits = **Minor**.
 - *Analytics:* PII leaking into event params or a duplicate-firing event that inflates metrics = **Critical**. New user action with no event at all = **Important**. Event-name convention drift = **Minor**.
 - *Credits:* paid-action path that bypasses `useCredit` / `hasCredits` = **Critical**. Missing refund on server-side failure = **Critical** (silent revenue leak). Granting credits outside IAP/webhook/admin = **Critical**. Anything ambiguous in IAP / refund / webhook code = **Important** at minimum — escalate to user before merge.
-- *Hot-path performance & degradation:* a new blocking round-trip / N+1 / per-item network dependency **before first paint** on a hot path = **Critical** — do not merge; the *design* needs to change, not the code. A new render-path dependency with no graceful-degradation story (blank-forever on failure) = **Critical**. A bounded latency add on a non-hot path, or a hot-path add that is already async / cached / non-blocking with a real fallback = **Minor**. "Looks good" here means the change either doesn't touch a hot path or keeps the render path synchronous/cached.
 - *Anti-patterns:* a hand edit to `project.pbxproj` / a target `Info.plist` / an `.xcscheme` (silently wiped on the next `xcodegen generate` → lost work) = **Critical**. Vendor/provider/model branching that leaks into the server contract the thin client depends on (could strand older iOS clients that can't be force-updated) = **Critical**; the same branching contained to web/server-only code = **Important**. Using a forbidden primitive where the project mandates an abstraction (raw `.sheet`, `window.confirm`, raw checkbox, hardcoded color class, direct haptic generator, duplicated AI logic, a reinvented packaged capability) = **Important** — it works, but it violates a hard project rule and drifts the codebase; fix before merge. A general/stylistic anti-pattern with no codified project rule = **Minor**.
+- *Hot-path performance & degradation:* a new blocking round-trip / N+1 / per-item network dependency **before first paint** on a hot path = **Critical** — do not merge; the *design* needs to change, not the code. A new render-path dependency with no graceful-degradation story (blank-forever on failure) = **Critical**. A bounded latency add on a non-hot path, or a hot-path add that is already async / cached / non-blocking with a real fallback = **Minor**. "Looks good" here means the change either doesn't touch a hot path or keeps the render path synchronous/cached.
+- *Backward compatibility:* any rename / remove / retype of a live contract field, route, analytics event, IAP product, or persisted Firestore field = **Critical** — production breakage on installed iOS clients. Tightened validation that rejects payloads the old iOS client still sends = **Critical**. A permanent `if (oldFormat) ... else ...` shim added in place of a real migration plan = **Important** (debt-on-debt; ask whether a migration with a kill date is on the table). Additive-only change explicitly documented as backwards-compatible in the PR's `## Notes` = "Looks good". Additive change with no `## Notes` line at all = **Minor** (ask the author to add the one-liner so a future reviewer doesn't have to re-derive it).
 
 ## Step 4.5 — Surface the review report (REQUIRED before triage)
 
@@ -409,6 +487,10 @@ WEB_DIFF=$(echo "$DIFF_FILES" \
 # Admin tooling — separate surface from regular web.
 ADMIN_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E "^src/app/admin/" || true)
 
+# Android UI changes — Compose screens/components/theme, the activity/root, and resources.
+# Mirrors IOS_UI_DIFF. Single-line regex (BSD grep aborts on embedded newlines).
+ANDROID_UI_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E '^android/.*/(ui|components|theme)/.*\.kt$|^android/.*/(MainActivity|RootScreen|.*Screen|.*Activity)\.kt$|^android/app/src/main/res/' || true)
+
 # Also catch contentful iOS plist changes that don't show up in --name-only —
 # additions/removals of plist keys that affect runtime behavior.
 PLIST_KEY_DIFF=$(git diff -G "NSSupportsLiveActivities|CFBundleURLTypes|NSExtensionPointIdentifier" origin/main..HEAD --name-only -- "ios/**/*.plist" "ios/project.yml" || true)
@@ -435,6 +517,13 @@ For each non-empty surface, run that surface's verification:
 1. Prompt: *"Admin tools changed. Smoke-test the admin flow before merge? Or 'skip'."*
    - **picks** → boot dev server (`/chrome /admin` or whatever path is affected), exercise the admin action end-to-end (e.g., force-end an LA, flip a config flag, view a dashboard). Verify the action's side effect actually happens (Firestore write, log line, UI state change).
    - **skip** → note in the merge comment.
+
+### Android surface (`ANDROID_UI_DIFF` non-empty)
+
+1. Prompt: *"Android UI changed. Build + run on the emulator (`/simulator android`) and drive the affected flow before merge? Or 'skip'."*
+   - **picks** → invoke `/simulator android` to build, install, and launch on the emulator, then drive the changed flow. Take a screenshot of any visual change. **Pause merge on any ❌** (crash, broken render, logcat error).
+   - **skip** → note the skip in the merge comment.
+2. There is no Android `/qa` (computer-use-driven) equivalent yet — verification is manual via the emulator. If the change has an iOS counterpart with a `## Visual smoke test`, the same steps apply conceptually; check parity by eye.
 
 ### Skip Step 5.5 entirely when:
 - The diff is server-only (`src/lib/**`, `src/app/api/**`, `firestore.rules`) — unit tests are the verification, no rendered surface to check.
@@ -592,6 +681,7 @@ Pause merge. State exactly what was expected vs. observed (status code, body, si
 
 - Diff is documentation-only (`docs/`, `*.md` files) — no TS to type-check.
 - Diff is iOS-only (`ios/...`) — Xcode build catches Swift type errors; `next build` is irrelevant.
+- Diff is Android-only (`android/...`) — the Gradle build (Step 5.9b) catches Kotlin type errors; `next build` is irrelevant.
 - Diff is skill / config / asset files (`.claude/skills/`, `.env*`, JSON catalogs) with no associated TS — nothing to compile.
 
 In any other case (`src/**/*.ts(x)`, `next.config.*`, `middleware.ts`, route handlers, components, hooks, services, scripts/*.ts), **run it**.
@@ -701,6 +791,34 @@ Fix the same way as any build failure: read the error, fix the underlying issue 
 
 - Never push the merge button on a PR whose iOS files fail `xcodebuild`. Use the same "Critical → fix → re-run → commit → push" loop you would for any other Critical finding.
 
+## Step 5.9b — Build gate: `gradlew assembleDebug` (REQUIRED for any Android Kotlin change)
+
+Parallel to Step 5.9's `xcodebuild` for iOS, this is the Android equivalent. Catches Kotlin compile errors, missing imports, unresolved references, and `@Serializable`/Compose annotation-processor failures that unit tests can't see.
+
+### When to skip Step 5.9b
+
+- Diff touches no Android files (`android/**` empty in the diff).
+- Diff is Android documentation, assets (`res/` drawables/strings only), or Gradle changes that don't affect compilation.
+- The `android/` project doesn't exist yet (Foundation layer hasn't landed) — nothing to build.
+
+In any other case (`android/**/*.kt`, `android/**/build.gradle.kts`, `settings.gradle.kts`, `gradle/libs.versions.toml`), **run it**.
+
+### Run
+
+```bash
+source scripts/android-config.sh 2>/dev/null || true
+test -d android || { echo "android/ not scaffolded — skip"; }
+cd android && ./gradlew :app:assembleDebug 2>&1 | tail -15 ; cd -
+```
+
+Expected: `BUILD SUCCESSFUL`. **Never pipe in a way that hides `BUILD FAILED`** — check the exit status (same rule as the iOS build). The Gradle build cache (`~/.gradle/caches` + `android/.gradle`) makes warm builds 15–40s.
+
+**No worktree saas-template symlink step** — the Android `:app` module consumes no saas-template SPMs (it's self-contained per the parity spec), so the iOS Step 5.9 symlink pre-flight does not apply.
+
+### On failure
+
+Treat as Critical equivalent — same severity as a security bug. Android doesn't auto-deploy (Play is a manual `/playstore` step), so a broken main doesn't immediately ship, but it blocks anyone running `/simulator android` after pulling main and the next Play cut. Read the error, fix the root cause (don't `@Suppress` past it), re-run, commit, push.
+
 ## Step 6 — Merge
 
 Once all Critical and Important issues are resolved:
@@ -738,6 +856,17 @@ If it fails:
 
 Skip this verification when the merged PR touched zero iOS Swift files.
 
+### Post-merge Android verification (REQUIRED when Android files were merged)
+
+Same squash-merge risk as iOS (a declaration landing twice from an earlier merge). Once main is updated, if the merged PR touched `android/**/*.kt`:
+
+```bash
+git checkout main && git pull --ff-only origin main
+cd android && ./gradlew :app:assembleDebug 2>&1 | tail -10 ; cd -
+```
+
+Expected: `BUILD SUCCESSFUL`. If it fails, push a hotfix commit to `main` immediately — Android doesn't auto-deploy (web stays safe), but a broken main blocks everyone's pull-rebase-build and the next `/playstore` cut. Skip when the merged PR touched zero Android files, or `android/` doesn't exist yet.
+
 ## Step 7 — Report
 
 Output a structured report in this exact shape — the user should be able to grade the entire shipping cycle from one scroll.
@@ -763,6 +892,7 @@ Output a structured report in this exact shape — the user should be able to gr
 | Unit tests (vitest) | <N passing / N failing> |
 | Rules tests | <ran / skipped — why> |
 | iOS build | <SUCCEEDED / FAILED / N/A> |
+| Android build (Step 5.9b) | <SUCCEEDED / FAILED / N/A> |
 | iOS UITest (Step 5.6) | <ran / skipped — why> |
 | Visual smoke test (Step 5.5) | <ran / skipped — why> |
 | CI workflow on the merged PR | <green / red — link / didn't run — why> |

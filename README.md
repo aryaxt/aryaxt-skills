@@ -29,10 +29,11 @@ Invoke `aryaxt:simulator` with any args passed by the user.
 
 | Skill | What it does |
 |---|---|
-| `simulator` | Build + launch iOS app on iPhone/iPad simulator. |
-| `emulator` | Build + launch Android app on an emulator (alias for `simulator android`). |
+| `simulator` | Build + launch the iOS app on an iPhone/iPad simulator, or the Android app on an emulator (`simulator android`). |
+| `emulator` | Build + launch the Android app on an emulator (alias for `simulator android`). |
 | `device` | Build + install on a real device. |
 | `testflight` | Bump build, archive, upload to App Store Connect. |
+| `playstore` | Bump versionCode, build a signed AAB, upload to the Google Play internal track. |
 | `chrome` | Boot Next.js dev server + open in Chrome. |
 | `doit` | Review local/committed changes → split PRs → multi-agent review → merge. |
 | `qa` | Per-feature visual smoke test on iOS simulator via computer-use. |
