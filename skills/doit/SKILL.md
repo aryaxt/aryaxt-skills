@@ -216,6 +216,74 @@ These two files are **always loaded into context** — every token in them is pa
 
 If any doc work is needed, do it now (same PR) before dispatching review — the review agents should see the docs alongside the code.
 
+## Step 3.10 — Cross-repo / cross-branch dependency check (before review)
+
+A change rarely lives in one repo. When this change **depends on code that only exists in an unmerged PR somewhere else**, merging this PR alone ships a consumer pointing at something that isn't on the other side's `main` yet — `main` breaks, deploys get stuck, or installed clients reference an export/skill/route that doesn't exist. The whole point of this step is to make those dependencies explicit **before** review, so the merge in Step 6 can be gated on them.
+
+### Detect sibling-repo work FIRST (don't rely on memory)
+
+The recurring failure this prevents: edits land in a sibling repo (`saas-template`, `aryaxt-skills`) during the session, the app PR merges, and the sibling work is left as an **uncommitted-or-orphaned local branch** that never ships — the sibling repo drifts out of sync and piles up dead branches (we've hit 39 in `saas-template`). "The agent forgot it touched a sibling repo" is the root cause, so **check explicitly** instead of recalling:
+
+```bash
+WORKTREE_ROOT=$(git rev-parse --show-toplevel)
+GIT_COMMON_ABS=$(cd "$WORKTREE_ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+REPOS_DIR=$(dirname "$(dirname "$GIT_COMMON_ABS")")   # the folder holding all sibling clones
+
+for sib in saas-template aryaxt-skills; do
+  SIB="$REPOS_DIR/$sib"
+  git -C "$SIB" rev-parse --git-dir >/dev/null 2>&1 || continue
+  BR=$(git -C "$SIB" rev-parse --abbrev-ref HEAD)
+  # Ignore build/dep noise (.build/, node_modules/, the generated android/ mirror)
+  DIRTY=$(git -C "$SIB" status --porcelain | /usr/bin/grep -vE '\.build/|node_modules/|^\?\? android/' || true)
+  AHEAD=$([ "$BR" != main ] && git -C "$SIB" log --oneline main.."$BR" 2>/dev/null || true)
+  if [ -n "$DIRTY" ] || [ -n "$AHEAD" ]; then
+    echo "⚠️  $sib has unshipped work (branch=$BR) — it MUST ship before the app PR:"
+    [ -n "$DIRTY" ] && { echo "  uncommitted:"; echo "$DIRTY" | sed 's/^/    /'; }
+    [ -n "$AHEAD" ] && { echo "  commits ahead of main:"; echo "$AHEAD" | sed 's/^/    /'; }
+  fi
+done
+```
+
+If this prints anything for a sibling repo, treat that repo's change as a **hard dependency PR** (rows below): it must be committed, PR'd, reviewed, and **merged before the app PR**, then pulled into the app (`vendor:refresh` for `@aryaxt/*` / Xcode reads the SPM live / `/plugin update` for skills). Never merge the app PR against uncommitted or unmerged sibling work. Record it under `## Notes` and carry it into the Step 6 hard gate.
+
+### Sibling lifecycle: fresh-main at rest, edits in a worktree
+
+The invariant that stops drift: **a sibling repo's primary checkout always sits on a clean, current `main`.** It is a dependency consumed by filesystem path — never a scratchpad. So:
+
+- **At rest / feature start** — the primary checkout is on `main`. If the detection above shows it parked on a feature branch or holding stray edits, that's drift: get it back to `main` (`git -C <sib> checkout main && git -C <sib> pull --ff-only`) *unless* those edits are this feature's in-flight sibling work (then move them into a worktree, below). Never start new work on top of a dirty sibling main.
+- **When THIS feature needs a sibling edit** — don't mutate the primary checkout. Cut a **worktree off fresh `origin/main`** and edit there, so the primary checkout stays clean and on `main`:
+
+  ```bash
+  SIB=~/Desktop/Repos/<sibling>          # saas-template | aryaxt-skills
+  git -C "$SIB" fetch -q origin
+  WT="${SIB}-wt"                          # sibling worktree lives beside the clone
+  git -C "$SIB" worktree add "$WT" -b <descriptive-branch> origin/main
+  # …make the change inside $WT…
+  ```
+
+- **Wire the app build to the worktree** so the in-flight change is actually exercised (the two consumption modes differ):
+  - **NPM / vendored `@aryaxt/*`** → `SAAS_TEMPLATE_DIR="$WT" npm run vendor:refresh` (reads from the worktree instead of the default clone).
+  - **iOS SPM** (`ios/project.yml` reads `../../saas-template/...` live) → repoint the peer symlink that the Step 5.9 pre-flight manages at the worktree: `ln -sfn "$WT" "$(dirname "$(git rev-parse --show-toplevel)")/saas-template"`. The Xcode build then compiles against the worktree. (This only works from an app worktree — which `/doit` always is — because that's where the peer symlink seam exists.)
+  - **Plugin skills (`aryaxt-skills`)** → no live wiring; the change takes effect after merge + `/plugin update`.
+
+Step 6 ships the worktree branch and then **removes the worktree, returning the sibling to a pure `main`**. Don't skip the worktree and edit the primary checkout in place — that's exactly how the repo ends up parked on a feature branch with a pile of orphaned local branches.
+
+Ask: **does landing this change require a change that is currently an open PR (or uncommitted work) in another repo or another branch?** Common dependency shapes in this setup:
+
+| Dependency shape | The tell | What must land together |
+|---|---|---|
+| **Shared / template package** (saas-template SPM like `Components`/`Auth`, an `@aryaxt/*` NPM, a sibling monorepo package) | This change imports a symbol/export/prop that was just added in the package and isn't on the package's `main` yet | The package PR **and** this consumer PR |
+| **Vendored dependency** (`vendor/…` copies of `@aryaxt/*`) | You edited the upstream package and this change consumes the new export — but the `vendor:refresh` + lockfile diff isn't in this PR | The upstream package PR, the `vendor:refresh` commit, **and** this consumer — all together, or `next build` fails with `export X was not found` |
+| **Plugin / shared skill** (the `aryaxt-skills` plugin, a shared config) | This change relies on a skill, gate, or config that was hand-edited or PR'd in the plugin but isn't on the plugin's `main` | The plugin PR (then `/plugin update`) before this consumer is relied upon |
+| **Sibling feature branch** | This branch was cut from another feature branch, or needs a route/migration/flag that lives in a different open PR | The prerequisite PR first, then this one rebased onto the merge |
+| **Server ↔ client contract split across PRs** | The server PR adds a field/route this client PR consumes (or vice-versa) | Order so the **producer merges first**; never merge the consumer against a contract that isn't live |
+
+**Enumerate every dependency PR by number/branch** (with the repo it lives in) and record them in this PR's description under `## Notes` — e.g. `Depends on: aryaxt/saas-template#88 (Components prop), vendor:refresh in this PR`. A reviewer (and future-you) must be able to see the full landing set.
+
+**The rule:** never merge this PR while a dependency PR is still open. Either (a) merge the dependency first, pull it into this change's base (rebase / `vendor:refresh` / `/plugin update`), re-run the build gate so this PR is verified against the *merged* dependency, then merge this PR — or (b) if the dependency can't land yet, **defer this PR** and say so. Step 6 enforces this as a hard gate.
+
+If there are **no** cross-repo/cross-branch dependencies, state that in `## Notes` ("Self-contained: no external dependency PRs") and continue.
+
 ## Step 4 — Parallel multi-agent review
 
 Dispatch review agents **in a single parallel batch** (one Agent tool call per reviewer). Pre-launch, the cost of shipping a bug is much higher than the cost of running extra agents — bias toward running the full fleet.
@@ -831,6 +899,35 @@ git pull --ff-only origin main
 
 If multiple PRs exist, merge them in dependency order. If they're independent, merge whichever is reviewed-and-clean first.
 
+### Hard gate: cross-repo / cross-branch dependencies (from Step 3.10)
+
+**Do NOT merge this PR while any dependency PR identified in Step 3.10 is still open.** Merging a consumer ahead of the dependency it needs is exactly how `main` breaks (`export X was not found`, a route/skill/field that doesn't exist, a stuck deploy, stranded installed clients).
+
+For each dependency PR, in order:
+
+1. **Ship the dependency first — from its worktree, then restore the sibling to `main`.** The sibling change lives in the `${SIB}-wt` worktree from Step 3.10 (if it's still uncommitted in the primary checkout, you skipped the worktree step — move it into one now). Commit, PR, review, merge with `--delete-branch`, then tear the worktree down so the sibling returns to a pure `main`:
+
+   ```bash
+   SIB=~/Desktop/Repos/<sibling>; WT="${SIB}-wt"
+   git -C "$WT" add -A && git -C "$WT" commit -m "<what changed>"
+   git -C "$WT" push -u origin <branch>
+   gh -R aryaxt/<sibling> pr create --fill                   # review it to the SAME bar as the app PR
+   gh -R aryaxt/<sibling> pr merge <n> --squash --delete-branch
+   # Restore the sibling to fresh main and remove the worktree (this is "switch the template PR back to main"):
+   git -C "$SIB" checkout main && git -C "$SIB" pull --ff-only
+   git -C "$SIB" worktree remove "$WT"                       # --force only if it has leftover build artifacts
+   git -C "$SIB" branch -D <branch> 2>/dev/null || true      # the branch ref, if it lingers post-worktree
+   ```
+
+   For a saas-template **NPM** package edit, update that package's `CLAUDE.md` in the *same* sibling PR. The sibling PR gets the same review bar as the app PR — don't rubber-stamp it just because it's "only a package."
+2. **Pull the *merged* dependency into this change's base** — for iOS, restore the peer symlink to the primary clone now on merged `main` (`ln -sfn "$SIB" "$(dirname "$(git rev-parse --show-toplevel)")/saas-template"`); for NPM run `npm run vendor:refresh` (default source = the clone, now on merged main) and commit the `vendor/` + `package-lock.json` diff into the app PR; for plugin skills run `/plugin update`. Whatever brings the merged dependency, not the open-PR/worktree version, into this PR's world.
+3. **Re-run the build gate** (Step 5.8 `next build` / 5.9 `xcodebuild` / 5.9b `gradlew`) so this PR is verified against the *merged* dependency.
+4. Only then merge this PR.
+
+**Always `--delete-branch` on the sibling merge AND `worktree remove` the sibling worktree** — confirm the remote branch, the local branch, and the worktree are all gone, and the primary checkout is back on clean `main`. The out-of-sync pile of dead branches and orphaned worktrees in `saas-template` is exactly the drift this gate exists to stop. If you cut a sibling branch/worktree that ends up NOT shipping (abandoned, or folded into another PR), remove it too — don't leave it dangling.
+
+If a dependency **can't** land yet (blocked, needs more review, not ready), **defer this PR** — don't merge it half-wired. Say so explicitly in the PR and to the user; a deferred PR with a clear "blocked on <dep PR>" note is correct, a merged-and-broken `main` is not.
+
 ### Post-merge iOS verification (REQUIRED when iOS files were merged)
 
 Squash-merge can produce code that **doesn't exist in either side individually** — a function declared in both the PR-branch and main (via an earlier merge) lands twice in the squashed result. Pre-merge `xcodebuild` (Step 5.9) catches in-branch errors but not this. Once main is updated:
@@ -923,6 +1020,34 @@ git stash list
 Also call out:
 - **Stashes created during this session** (compare `git stash list` against what was there at session start, if you can tell). Stashes survive across sessions but they're easy to forget. If you created any during /doit (e.g. for a split), confirm they were dropped.
 - **Branches still checked out** in worktrees that aren't `main`. Not unsafe per se, but worth flagging if the user expects to come back to them.
+
+**Sibling-repo hygiene (REQUIRED).** The session often touches `saas-template` / `aryaxt-skills`, and left unattended those repos accumulate dead branches, orphaned worktrees, and stray uncommitted edits that drift out of sync (this is how `saas-template` reached 39 stale branches + 2 leftover merged worktrees). The end state to confirm: **each sibling's primary checkout on a clean, current `main`, no `/doit`-created worktree left behind.** Re-run the detection across the siblings and report:
+
+```bash
+REPOS_DIR=$(dirname "$(dirname "$(cd "$(git rev-parse --git-common-dir)" && pwd -P)")")
+for sib in saas-template aryaxt-skills; do
+  SIB="$REPOS_DIR/$sib"; git -C "$SIB" rev-parse --git-dir >/dev/null 2>&1 || continue
+  git -C "$SIB" fetch -q origin --prune 2>/dev/null || true
+  echo "=== $sib (primary checkout on: $(git -C "$SIB" rev-parse --abbrev-ref HEAD)) ==="
+  echo "  uncommitted (excl. build noise):"
+  git -C "$SIB" status --porcelain | /usr/bin/grep -vE '\.build/|node_modules/|^\?\? android/' | sed 's/^/    /'
+  echo "  worktrees (anything besides the primary clone on main is suspect):"
+  git -C "$SIB" worktree list | sed 's/^/    /'
+  echo "  non-main local branches ($(git -C "$SIB" for-each-ref --format='%(refname:short)' refs/heads/ | /usr/bin/grep -vxc main) total):"
+  git -C "$SIB" for-each-ref --format='%(refname:short)' refs/heads/ | /usr/bin/grep -vx main | sed 's/^/    /'
+done
+```
+
+- **Primary checkout not on `main`** → restore it (`git -C <sib> checkout main && git -C <sib> pull --ff-only`). This is the "switch the template back to main" the user asked for; the in-flight branch survives as a ref / open PR.
+- **Leftover worktree for an already-merged branch** → `git -C <sib> worktree remove --force <path>` then `git -C <sib> worktree prune`. A worktree holds its branch, blocking branch deletion — remove it first.
+- **Uncommitted edits in a sibling that came from THIS session** → same keep/discard triage as the app tree. If they were part of the change just shipped, they should already be a merged PR from Step 6 — flag loudly if still sitting uncommitted. (Stat-dirty-but-`git diff`-empty files are a harmless branch-switch artifact — clear with `git -C <sib> checkout -- <path>`.)
+- **Stale local branches** → the reliable "safe to delete" test is **a merged PR**, not `git branch --merged`: squash-merge (this project's default) leaves the branch tip unreachable from `main`, so `--merged` reports it as un-merged and misses it. Cross-reference instead:
+  ```bash
+  gh -R aryaxt/<sib> pr list --state merged --limit 200 --json headRefName -q '.[].headRefName' | sort -u > /tmp/merged.txt
+  git -C <sib> for-each-ref --format='%(refname:short)' refs/heads/ | grep -vx main | sort -u > /tmp/local.txt
+  comm -12 /tmp/local.txt /tmp/merged.txt    # branches with a merged PR → delete with `git -C <sib> branch -D`
+  ```
+  Delete the merged-PR branches (`-D`, since `-d` refuses squash-merged ones). Do NOT delete branches with an **open** PR or **no** PR (live WIP) — list those so the user decides. Report the before/after non-main branch count.
 
 **Final verdict format** — give the user one of these three lines:
 
