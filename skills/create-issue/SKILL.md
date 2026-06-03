@@ -110,13 +110,16 @@ The two axes can — and often should — co-occur. A release-blocker is almost 
 - Bug that breaks a critical flow (sign-in, payment, generation, account deletion) → `release-blocker` + `P0`.
 - Bug that's high priority to fix but not actively breaking production → `P0` or `P1`, no `release-blocker`.
 
-Examples:
-- "Account deletion silently fails" → `bug`, `auth`, `release-blocker`, `P0`
+Examples (note the platform tag(s) on every client-facing ticket):
+- "Account deletion silently fails on iOS" → `bug`, `ios`, `auth`, `release-blocker`, `P0`
 - "IAP receipts not validating on iOS 18.2" → `bug`, `ios`, `payment`, `release-blocker`, `P0`
-- "Replicate poll path can 429" → `bug`, `ai`, `backend`, `P2` (self-heals next poll, not release-blocking)
-- "Add light mode support" → `feature`, `ios`, `P2`
-- "Refactor credit-grant service" → `chore`, `backend` (no priority label needed)
-- "Live Activities silently failing for 3% of users" → `bug`, `ios`, `push-notification`, `P1` (real bug but small blast radius, doesn't block release)
+- "Replicate poll path can 429" → `bug`, `ai`, `backend`, `P2` (server-only — no platform label; self-heals next poll, not release-blocking)
+- "Add light/dark mode toggle everywhere" → `feature`, `ios`, `android`, `web`, `P2` (cross-platform — all three)
+- "Add aspect-ratio picker to the prompt bar" → `feature`, `ios`, `android`, `web`, `P2` (a prompt-bar control that ships on every client)
+- "Refactor credit-grant service" → `chore`, `backend` (server-only — no platform label)
+- "Android video saves to the photo library instead of videos on API 26–28" → `bug`, `android`, `P2`
+- "Server telemetry tags Android errors as iOS" → `bug`, `android`, `backend`, `P2` (server change, but it's about the Android client → tag `android`)
+- "Live Activities silently failing for 3% of users" → `bug`, `ios`, `push-notification`, `P1` (iOS-only feature, small blast radius, doesn't block release)
 
 ```bash
 # Build the label flags from the axes that apply. Skip flags for axes you didn't pick.
@@ -188,6 +191,7 @@ A good issue means Claude can pick it up via `/work-on-issue` **without asking a
 ## When to extend this skill
 
 If you find yourself reaching for a label that doesn't fit any table above more than once, that's a signal to add it to the relevant axis (and create the GitHub label) rather than skipping it. Edit this file when:
-- A new recurring surface emerges (e.g. `android` once that ships, `analytics`, `onboarding`)
+- A new platform ships (the three clients — `ios`, `android`, `web` — are live; add the next one here if a new client appears)
+- A new recurring Area emerges (e.g. `analytics`, `onboarding`)
 - Project IDs change (project rename, field reshuffle, repo migration)
 - The severity rubric needs sharpening based on actual release-blocker usage

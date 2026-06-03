@@ -265,6 +265,7 @@ COMMIT_SHORT=$(echo "$RELEASE_SHA" | cut -c1-8)
 
 gh release create "$TAG" \
   --target "$RELEASE_SHA" \
+  --prerelease \
   --title "iOS ${MARKETING_VERSION} (Build ${NEW_BUILD})" \
   --notes "$(cat <<NOTES
 ## What's new
@@ -287,6 +288,12 @@ NOTES
 ```
 
 Notes:
+- **Every TestFlight upload is created as a `--prerelease`.** GitHub's "Latest release" badge stays on the most recent App Store-shipped build (see below). When Apple accepts a build for the App Store, promote it manually:
+  ```bash
+  gh release edit ios-build-<NUM> --prerelease=false --latest \
+    --title "App Store <MARKETING> (Build <NUM>)"
+  ```
+  This keeps a single source-of-truth release per build — no duplicate tags — and the "Latest" pointer in the Releases tab always reflects what's actually shipping to end users.
 - The commit filter strips chore/ci/docs noise — testers see only feature and fix bullets.
 - `fix:` commits get a 🐛 prefix and `perf:` get ⚡ so the list is scannable at a glance.
 - The metadata table gives you version, build, commit SHA, and a direct App Store Connect link in one place.
