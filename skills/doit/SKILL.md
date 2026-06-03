@@ -264,7 +264,7 @@ The invariant that stops drift: **a sibling repo's primary checkout always sits 
 - **Wire the app build to the worktree** so the in-flight change is actually exercised (the two consumption modes differ):
   - **NPM / vendored `@aryaxt/*`** → `SAAS_TEMPLATE_DIR="$WT" npm run vendor:refresh` (reads from the worktree instead of the default clone).
   - **iOS SPM** (`ios/project.yml` reads `../../saas-template/...` live) → repoint the peer symlink that the Step 5.9 pre-flight manages at the worktree: `ln -sfn "$WT" "$(dirname "$(git rev-parse --show-toplevel)")/saas-template"`. The Xcode build then compiles against the worktree. (This only works from an app worktree — which `/doit` always is — because that's where the peer symlink seam exists.)
-  - **Plugin skills (`aryaxt-skills`)** → no live wiring; the change takes effect after merge + `/plugin update`.
+  - **Plugin skills (`aryaxt-skills`)** → no live wiring; the change takes effect after merge, via the plugin-cache refresh in Step 6 ("Refresh the local plugin cache after ANY `aryaxt-skills` merge").
 
 Step 6 ships the worktree branch and then **removes the worktree, returning the sibling to a pure `main`**. Don't skip the worktree and edit the primary checkout in place — that's exactly how the repo ends up parked on a feature branch with a pile of orphaned local branches.
 
@@ -920,9 +920,32 @@ For each dependency PR, in order:
    ```
 
    For a saas-template **NPM** package edit, update that package's `CLAUDE.md` in the *same* sibling PR. The sibling PR gets the same review bar as the app PR — don't rubber-stamp it just because it's "only a package."
-2. **Pull the *merged* dependency into this change's base** — for iOS, restore the peer symlink to the primary clone now on merged `main` (`ln -sfn "$SIB" "$(dirname "$(git rev-parse --show-toplevel)")/saas-template"`); for NPM run `npm run vendor:refresh` (default source = the clone, now on merged main) and commit the `vendor/` + `package-lock.json` diff into the app PR; for plugin skills run `/plugin update`. Whatever brings the merged dependency, not the open-PR/worktree version, into this PR's world.
+2. **Pull the *merged* dependency into this change's base** — for iOS, restore the peer symlink to the primary clone now on merged `main` (`ln -sfn "$SIB" "$(dirname "$(git rev-parse --show-toplevel)")/saas-template"`); for NPM run `npm run vendor:refresh` (default source = the clone, now on merged main) and commit the `vendor/` + `package-lock.json` diff into the app PR; **for `aryaxt-skills` plugin skills, run the cache-refresh procedure below** (NOT a bare `/plugin update` — a skill can't invoke that built-in command itself, which is exactly how the cache went stale and a merged skill change silently failed to take effect). Whatever brings the merged dependency, not the open-PR/worktree version, into this PR's world.
 3. **Re-run the build gate** (Step 5.8 `next build` / 5.9 `xcodebuild` / 5.9b `gradlew`) so this PR is verified against the *merged* dependency.
 4. Only then merge this PR.
+
+### Refresh the local plugin cache after ANY `aryaxt-skills` merge (REQUIRED)
+
+Whenever a PR is merged into `aryaxt-skills` during a `/doit` run — whether it's the primary work or a sibling dependency of an app PR — the locally-installed plugin must be reset to the just-merged `main`, or the merged skill change won't take effect in this (or the next) session. This is the failure that shipped a `/playstore` run blind to its own uploader scripts: the scripts were on `aryaxt-skills` `main`, but the local plugin **cache** predated them, so the skill behaved as if they didn't exist.
+
+A skill cannot invoke the built-in `/plugin update` command itself, so do the git-level equivalent — pull the marketplace clone to merged `main`, then re-copy it into every cached version dir:
+
+```bash
+MP=~/.claude/plugins/marketplaces/aryaxt          # the marketplace = a git clone of aryaxt-skills
+git -C "$MP" checkout -q main && git -C "$MP" pull --ff-only origin main
+# Re-sync each cached plugin version from the freshly-pulled clone (copy-only; never rename the version dir):
+for vdir in ~/.claude/plugins/cache/aryaxt/aryaxt-skills/*/; do
+  rsync -a --delete "$MP/skills/" "$vdir/skills/"
+  [ -d "$MP/.claude-plugin" ] && rsync -a "$MP/.claude-plugin/" "$vdir/.claude-plugin/" 2>/dev/null || true
+done
+# Sanity-check: the file you just merged should now exist under the cache.
+ls ~/.claude/plugins/cache/aryaxt/aryaxt-skills/*/skills/<changed-skill>/
+```
+
+Notes:
+- This is safe and reversible — it only copies files into the existing cache version dir; it does not delete or rename the dir, so a half-run can't brick the plugin.
+- If `installed_plugins.json` shows a plugin **version bump** (the `.claude-plugin` manifest's `version` changed), the cache dir name (e.g. `0.1.0/`) will differ from the new manifest version; in that case also tell the user to run `/plugin update aryaxt-skills` so Claude Code creates the new version dir — the rsync above keeps the *current* session working regardless.
+- Mention in the final report that the plugin cache was refreshed to `<merged-sha>`, so the user knows the new skill behavior is live.
 
 **Always `--delete-branch` on the sibling merge AND `worktree remove` the sibling worktree** — confirm the remote branch, the local branch, and the worktree are all gone, and the primary checkout is back on clean `main`. The out-of-sync pile of dead branches and orphaned worktrees in `saas-template` is exactly the drift this gate exists to stop. If you cut a sibling branch/worktree that ends up NOT shipping (abandoned, or folded into another PR), remove it too — don't leave it dangling.
 
