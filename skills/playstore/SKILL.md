@@ -7,7 +7,13 @@ description: Use when the user asks to "ship to Play Store", "push to Google Pla
 
 This project has **no fastlane and no CI workflow** for Android — Play uploads are done manually from a local machine via Gradle (`bundleRelease`) + a small Node uploader that talks to the Google Play Developer Publishing API. This skill is the canonical procedure, and is the Android mirror of `/testflight`.
 
-Per-project values come from `scripts/android-config.sh` (`ANDROID_APPLICATION_ID`, `ANDROID_KEYSTORE_PATH`, `ANDROID_PLAY_SERVICE_ACCOUNT_JSON`, `ANDROID_PLAY_DEFAULT_TRACK`, …). Source it first.
+**The uploader scripts ship WITH this skill** (`play-latest-build.mjs`, `play-upload-aab.mjs`, `play-lib.mjs` in the skill's own directory) and are **generic / app-agnostic** — they take the package id and service-account path from flags or environment, so the same scripts work for every consuming app. Set `SKILL_DIR` to this skill's base directory (printed when the skill is invoked) and call the scripts from there:
+
+```bash
+SKILL_DIR="<this skill's base directory>"   # e.g. ~/.claude/plugins/.../skills/playstore
+```
+
+Per-project values come from `scripts/android-config.sh` in the consuming repo (`ANDROID_APPLICATION_ID`, `ANDROID_KEYSTORE_PATH`, `ANDROID_PLAY_SERVICE_ACCOUNT_JSON`, `ANDROID_PLAY_DEFAULT_TRACK`, …). Source it first — the scripts read `ANDROID_APPLICATION_ID` / `ANDROID_PLAY_SERVICE_ACCOUNT_JSON` from the environment it exports.
 
 > **Greenfield note:** the Android app is being built feature-by-feature (see `docs/superpowers/specs/2026-06-01-android-port-foundation-design.md`). This skill is usable once the `android/` Gradle project exists, an upload keystore has been created, the app is registered in the Play Console, and a Play service account JSON is in place (see "One-time Play setup" at the bottom). If any of those are missing, do that setup first — don't try to ship a project that can't be signed or has no Play listing.
 
@@ -17,7 +23,7 @@ Per-project values come from `scripts/android-config.sh` (`ANDROID_APPLICATION_I
 2. **`android/` project exists** — `test -d android || stop`.
 3. **Upload keystore** at `$ANDROID_KEYSTORE_PATH` (default `~/.android-signing/canvaspell-upload.keystore`), with the alias `$ANDROID_KEY_ALIAS`. The keystore passwords live in `~/.android-signing/keystore.properties` (or env), **never committed**.
 4. **Play service account JSON** at `$ANDROID_PLAY_SERVICE_ACCOUNT_JSON` — a Google Cloud service account granted release access in the Play Console (Users & permissions → Invite → grant "Release to testing tracks"). Used by the uploader to authenticate to the Publishing API.
-5. **`googleapis` available** for the Node uploader (`npm ls googleapis` or installed globally). The uploader script is `scripts/play-upload-aab.mjs`.
+5. **`googleapis` available** to the Node uploader — installed in the consuming project (`npm ls googleapis`; if missing, `npm i -D googleapis`). The scripts resolve it from the project's `node_modules` even though they live in the skill dir. The uploader is `$SKILL_DIR/play-upload-aab.mjs`.
 6. **Java + Android SDK** installed and on PATH (`./gradlew` works; `adb`/`sdkmanager` resolve).
 
 If any prereq is missing, stop and ask before continuing — this is a user-visible action (testers receive the build).
@@ -47,9 +53,11 @@ Capture `LAST_RELEASE_TAG=$(git describe --tags --match 'android-build-*' --abbr
 
 ```bash
 source scripts/android-config.sh
-# Reuses ANDROID_PLAY_SERVICE_ACCOUNT_JSON / ANDROID_APPLICATION_ID.
-# Prints the highest versionCode currently live across tracks.
-node scripts/play-latest-build.mjs
+# Reuses ANDROID_PLAY_SERVICE_ACCOUNT_JSON / ANDROID_APPLICATION_ID from the env
+# android-config.sh exports. Prints the highest versionCode reserved across all
+# tracks' releases AND every uploaded bundle (a versionCode is "used" at upload
+# time, even if never assigned to a track).
+node "$SKILL_DIR/play-latest-build.mjs"
 ```
 
 **Versioning scheme — date-based, mirroring iOS:**
@@ -107,7 +115,8 @@ Run with `run_in_background: true` and monitor — a clean release build is 2–
 source scripts/android-config.sh
 # Authenticates with the service-account JSON, uploads the AAB to the track,
 # sets the release notes, and (for testing tracks) rolls out to 100%.
-node scripts/play-upload-aab.mjs "$AAB" --track="${ANDROID_PLAY_DEFAULT_TRACK}" --versionCode=<N>
+# Add --mapping=android/app/build/outputs/mapping/release/mapping.txt when minify is on.
+node "$SKILL_DIR/play-upload-aab.mjs" "$AAB" --track="${ANDROID_PLAY_DEFAULT_TRACK}" --versionCode=<N>
 ```
 
 The default track is `internal` (fastest propagation, mirrors TestFlight internal testers). Use `--track=alpha` / `--track=beta` for wider testing groups. Production rollout is intentionally NOT the default — never push to `production` without the user explicitly asking.
@@ -207,7 +216,7 @@ Before the first `/playstore` run, four things must exist. These are operator st
 
 3. **Play service account** (per project, once): create a Google Cloud service account, grant it access in Play Console → Users & permissions (at least "Release to testing tracks"), download its JSON to `$ANDROID_PLAY_SERVICE_ACCOUNT_JSON`.
 
-4. **Uploader scripts** (per project, once): add `scripts/play-latest-build.mjs` (reads highest live versionCode) and `scripts/play-upload-aab.mjs` (uploads an AAB to a track) using the `googleapis` `androidpublisher` client — the Android mirrors of `scripts/asc-latest-build.mjs` / `scripts/asc-assign-build.mjs`.
+4. **`googleapis` dependency** (per project, once): the uploader scripts ship with this skill and are generic, but they need the `googleapis` package resolvable from the consuming project — `npm i -D googleapis`. No per-project script authoring; `play-latest-build.mjs` / `play-upload-aab.mjs` / `play-lib.mjs` live in the skill dir and read the package id + service-account path from `android-config.sh`'s env (or `--package=` / `--service-account=` flags).
 
 ## Things to watch for
 
