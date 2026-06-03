@@ -14,14 +14,19 @@ export async function loadGoogleapis() {
   try {
     return await import("googleapis");
   } catch {
+    // Resolve from the consuming project. createRequire only needs an anchor whose
+    // directory exists (the anchor file itself need not), and require.resolve then
+    // walks node_modules up from cwd — so this also finds googleapis installed a
+    // level above when run from a subdir.
     try {
-      const require = createRequire(pathToFileURL(join(process.cwd(), "package.json")));
+      const require = createRequire(pathToFileURL(join(process.cwd(), "noop.js")));
       return await import(pathToFileURL(require.resolve("googleapis")));
-    } catch {
+    } catch (e) {
       console.error(
         "missing dependency: googleapis\n" +
         "  install it in the consuming project:  npm i -D googleapis\n" +
-        "  (the uploader resolves it from the project's node_modules)"
+        "  (the uploader resolves it from the project's node_modules)\n" +
+        `  underlying resolve error: ${e?.message ?? e}`
       );
       process.exit(1);
     }

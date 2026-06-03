@@ -49,6 +49,21 @@ if (!packageName) {
   console.error("missing package: pass --package=<applicationId> or set ANDROID_APPLICATION_ID");
   process.exit(1);
 }
+// Validate --rollout loudly — a fat-fingered value must NOT silently fall through
+// to a full rollout (or send the API an invalid userFraction:0).
+let rolloutFraction = null;
+if (rollout != null) {
+  if (track !== "production") {
+    console.error(`--rollout is only valid for --track=production (got track="${track}")`);
+    process.exit(1);
+  }
+  const n = Number(rollout);
+  if (!Number.isFinite(n) || n <= 0 || n >= 1) {
+    console.error(`--rollout must be a number strictly between 0 and 1 (got "${rollout}")`);
+    process.exit(1);
+  }
+  rolloutFraction = n;
+}
 
 const { createReadStream } = await import("fs");
 const androidpublisher = await loadAndroidPublisher(serviceAccount);
@@ -88,19 +103,23 @@ try {
     console.log(`uploaded mapping.txt for versionCode ${versionCode}`);
   }
 
-  // 3) Assign to the track. Testing tracks roll out fully; production honors
-  //    --rollout (staged) when given, else full ("completed").
+  // 3) Assign to the track. Testing tracks roll out fully; production honors a
+  //    validated --rollout (staged), else full ("completed").
   const release = {
     versionCodes: [String(versionCode)],
     releaseNotes: [{ language: lang, text: notes }],
   };
-  if (track === "production" && rollout && Number(rollout) < 1) {
+  if (rolloutFraction != null) {
     release.status = "inProgress";
-    release.userFraction = Number(rollout);
+    release.userFraction = rolloutFraction;
   } else {
     release.status = "completed";
   }
 
+  // NOTE: edits.tracks.update REPLACES the track's entire release list (it is not
+  // a merge). For internal/testing that's intended; for production with an
+  // in-flight staged rollout this overwrites it — use tracks.patch if merge
+  // semantics are ever needed.
   await androidpublisher.edits.tracks.update({
     packageName,
     editId,
