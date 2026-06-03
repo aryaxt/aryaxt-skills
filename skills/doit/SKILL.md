@@ -932,6 +932,8 @@ A skill cannot invoke the built-in `/plugin update` command itself, so do the gi
 
 ```bash
 MP=~/.claude/plugins/marketplaces/aryaxt          # the marketplace = a git clone of aryaxt-skills
+# The clone is a generated mirror, never hand-edited — if it's somehow dirty,
+# `git -C "$MP" reset --hard` first, else the checkout below aborts the whole refresh.
 git -C "$MP" checkout -q main && git -C "$MP" pull --ff-only origin main
 # Re-sync each cached plugin version from the freshly-pulled clone (copy-only; never rename the version dir):
 for vdir in ~/.claude/plugins/cache/aryaxt/aryaxt-skills/*/; do
