@@ -38,6 +38,33 @@ When in doubt, **keep it one PR**. Unnecessary splitting adds overhead without b
 
 ## Step 3 — Create branch(es) and PR(s)
 
+### Pre-flight: worktree dependency install (REQUIRED in a worktree)
+
+`/doit` almost always runs from a feature branch under `.claude/worktrees/`. A fresh worktree has **no `node_modules` of its own** — and because it's nested inside the main repo, Node's module resolution walks UP and silently falls back to the **main repo's** `node_modules`, which was installed on a *different branch*. If this branch declares newer deps than that branch had installed (a new vendored `@aryaxt/*` package, an SDK bump, a new dependency), every downstream step that runs code resolves the **wrong, stale deps** — the first `git push` below fires the pre-push hook (`npm run test:all`) against them, and `next build` (5.8) / the unit-test gate (5.8b) / the dev server (5.7) all inherit the mismatch.
+
+We hit this concretely: a worktree branch that pulled in `@aryaxt/app-gate` (added to the app on a later `main` than the main clone's checked-out branch) ran its whole suite against the main repo's older `node_modules`, which had no `@aryaxt/app-gate` and a stale `@aryaxt/error-reporting` — **52 suites failed at import** with `Cannot find package '@aryaxt/app-gate'`. The tests were fine; the *install* was wrong. This is the web analog of the Step 5.9 iOS saas-template-symlink pre-flight and `/chrome`'s `.env.local` symlink.
+
+Run this **before the first `git push`** (the push triggers the pre-push test hook), and never symlink the worktree's `node_modules` to the main repo's — that's the wrong branch's copy:
+
+```bash
+WORKTREE_ROOT=$(git rev-parse --show-toplevel)
+GIT_COMMON_ABS=$(cd "$WORKTREE_ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+PARENT_REPO=$(dirname "$GIT_COMMON_ABS")
+# Only act in a worktree (parent repo differs from the working root) and only for web projects.
+if [ "$PARENT_REPO" != "$WORKTREE_ROOT" ] && [ -f "$WORKTREE_ROOT/package.json" ]; then
+  # Sentinel: a vendored/declared package that should resolve to THIS worktree's own node_modules.
+  # Pick any @aryaxt/* the branch declares; app-gate is the canonical recent one.
+  if [ ! -e "$WORKTREE_ROOT/node_modules/@aryaxt/app-gate/package.json" ] && grep -q '@aryaxt/app-gate' "$WORKTREE_ROOT/package.json"; then
+    echo "Worktree node_modules missing/stale — installing this branch's deps…"
+    ( cd "$WORKTREE_ROOT" && npm install )   # ~20s; materializes file: vendored @aryaxt/* via install-links=true
+  fi
+fi
+```
+
+It's incremental-fast (~20s warm) and usually leaves `package-lock.json` unchanged (nothing to commit). If `git status` shows a lockfile diff, that's a real dep drift — commit it with the PR. CI (`npm ci` fresh) is unaffected; this gap only bites local worktree runs.
+
+**On a failing pre-push hook (`npm run test:all`), DIAGNOSE before you `--no-verify`.** Mass import-time failures across unrelated suites (`Cannot find package …`, `X is not a function` from a vendored package) are the signature of *this* stale-`node_modules` problem, not real test breakage — the fix is the `npm install` above, not a bypass. `--no-verify` defeats the only unit-test gate `/doit` actually relies on (the hook); reach for it only once you've confirmed the failures are genuinely pre-existing and unrelated to the deps.
+
 For each logical unit of work:
 
 ```bash
@@ -782,6 +809,48 @@ A real `Type error` from `next build` is a Critical finding equivalent — same 
 
 - Never merge a PR that fails `next build`. App Hosting auto-deploys on main and a failing build means production is stuck on the previous revision. Subtle: the previous revision keeps serving traffic indefinitely, so the symptom is "feature doesn't work in prod" not "site is down" — easy to miss without checking deploy status.
 - Never `--admin`-bypass the gate to merge through a failing build with the intent to fix later. The intent never materializes; the bug ships.
+
+## Step 5.8b — Unit test gate: `npm test` (REQUIRED for any web change)
+
+**Why this step exists:** `next build` (5.8) catches *type* mismatches but runs no assertions — it won't tell you the credit math is wrong, the webhook idempotency check regressed, or a rules change opened a hole. The vitest suite does. Until now `/doit` had no step that actually *ran* the unit suite — it only reported a count in Step 7 and leaned on the git **pre-push hook** (`npm run test:all`) as the de-facto gate. That's fragile: the hook is bypassable (`--no-verify`), and a worktree dep mismatch (see the Step 3 pre-flight) makes it fail for reasons that *look* like pre-existing breakage and invite a bypass. Make the gate explicit and owned by the skill.
+
+### When to skip Step 5.8b
+
+- Diff is documentation / asset / copy-only — no logic to exercise.
+- Diff is iOS-only (`ios/...`) or Android-only (`android/...`) — the platform build + UITests are the verification; there's no vitest for native code.
+- Diff is skill / config files with no associated TS.
+
+In any other case (`src/**`, `scripts/*.ts`, `firestore.rules`, anything with test coverage), **run it**.
+
+### Run
+
+```bash
+# Web unit suite. If firestore.rules / storage.rules (or their tests) changed, run the
+# rules suite too — `npm run test:all` does both (unit + emulator-backed rules tests).
+npm test 2>&1 | tail -15
+# …or, when rules changed:
+npm run test:all 2>&1 | tail -15
+```
+
+Expected: `Test Files  N passed` / `Tests  N passed`, exit code 0 — **zero failed**. (The rules suite logs expected `PERMISSION_DENIED` lines from its negative tests; those are not failures — read the final summary, not the stderr.)
+
+This is also where the **Step 3 worktree pre-flight pays off** — if `npm test` face-plants with `Cannot find package '@aryaxt/...'` or `X is not a function` across many unrelated suites, that's the stale-`node_modules` signature, not a real failure: run `npm install` in the worktree (Step 3 pre-flight) and re-run, don't start "fixing" green tests.
+
+### On failure
+
+A genuinely failing test is a **Critical** finding equivalent — do not merge.
+
+1. **Stop the merge.**
+2. Triage: is it (a) a real regression this change introduced, (b) a brittle/now-outdated test whose expectation legitimately changed, or (c) the stale-deps artifact above?
+   - (a) → fix the code at its source, push to the same PR branch.
+   - (b) → update the test to assert the new contract (don't delete it to get green).
+   - (c) → `npm install` in the worktree; re-run. Not a code change.
+3. Re-run `npm test` until green, then continue.
+
+### Don't bypass
+
+- Don't merge with a failing suite "to fix later" — it rots, and the next change inherits a red baseline that hides its own regressions.
+- Don't `git push --no-verify` to skip the pre-push hook *as a way around a red suite*. Bypass is only ever acceptable once you've **diagnosed** the failures as pre-existing and unrelated to the diff (e.g. the worktree dep artifact) — and even then, fixing the environment (the Step 3 `npm install`) is the right move, not the bypass.
 
 ## Step 5.9 — Build gate: `xcodebuild` (REQUIRED for any iOS Swift change)
 
