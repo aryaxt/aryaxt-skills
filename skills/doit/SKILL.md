@@ -817,7 +817,8 @@ A real `Type error` from `next build` is a Critical finding equivalent — same 
 ### When to skip Step 5.8b
 
 - Diff is documentation / asset / copy-only — no logic to exercise.
-- Diff is iOS-only (`ios/...`) or Android-only (`android/...`) — the platform build + UITests are the verification; there's no vitest for native code.
+- Diff is iOS-only (`ios/...`) — the iOS build (5.9) + XCUITest (5.6) are the verification; there's no vitest for Swift.
+- Diff is Android-only (`android/...`) — the Android build (5.9b) + Android unit tests (5.9c) are the verification; there's no vitest for Kotlin.
 - Diff is skill / config files with no associated TS.
 
 In any other case (`src/**`, `scripts/*.ts`, `firestore.rules`, anything with test coverage), **run it**.
@@ -956,6 +957,42 @@ Expected: `BUILD SUCCESSFUL`. **Never pipe in a way that hides `BUILD FAILED`** 
 
 Treat as Critical equivalent — same severity as a security bug. Android doesn't auto-deploy (Play is a manual `/playstore` step), so a broken main doesn't immediately ship, but it blocks anyone running `/simulator android` after pulling main and the next Play cut. Read the error, fix the root cause (don't `@Suppress` past it), re-run, commit, push.
 
+## Step 5.9c — Unit test gate: `gradlew testDebugUnitTest` (REQUIRED for any Android Kotlin change)
+
+**Why this step exists:** Step 5.9b's `assembleDebug` *compiles* the Android code (including the test sources, transitively) but runs **no assertions** — it's the Android analog of `next build` (5.8) / `xcodebuild` (5.9), and it won't tell you a DTO `@Serializable` round-trip broke, the credit math in a ViewModel regressed, or a mapper now drops a field. The JVM unit suite does. This is the Android counterpart of Step 5.8b's `npm test` (web vitest) and Step 5.6's XCUITest run (iOS) — the platforms each have a build gate AND a test gate, and Android was missing the second. The suite is substantial (`android/app/src/test/` carries real ViewModel / mapper / DTO coverage), so a green compile is not a green suite.
+
+`:app:testDebugUnitTest` runs **JVM-local unit tests only** — no emulator, no device, fast. It does NOT run `androidTest` instrumented tests (those need an emulator and belong to the manual `/simulator android` smoke test in Step 5.5, not an automated gate).
+
+### When to skip Step 5.9c
+
+- Diff touches no Android files (`android/**` empty in the diff).
+- Diff is Android documentation, assets (`res/` drawables/strings only), or Gradle changes that don't affect compiled logic.
+- The `android/` project doesn't exist yet (Foundation layer hasn't landed), or it carries no `app/src/test/` sources — nothing to run.
+
+In any other case (`android/**/*.kt`, `android/**/build.gradle.kts`, `settings.gradle.kts`, `gradle/libs.versions.toml`), **run it**.
+
+### Run
+
+```bash
+source scripts/android-config.sh 2>/dev/null || true
+test -d android/app/src/test || { echo "no android/app/src/test — skip"; }
+cd android && ./gradlew :app:testDebugUnitTest 2>&1 | tail -20 ; cd -
+```
+
+Expected: `BUILD SUCCESSFUL`, exit code 0 — **zero failed**. **Never pipe in a way that hides `BUILD FAILED`** — check the exit status (same rule as the build gates). On failure, the per-test HTML report lands at `android/app/build/reports/tests/testDebugUnitTest/index.html`; read it for the failing assertion. Gradle caches make a warm test run 15–40s; it's incremental, so an `assembleDebug` (5.9b) immediately before warms most of the compile.
+
+### On failure
+
+A genuinely failing test is a **Critical** finding equivalent — do not merge.
+
+1. **Stop the merge.**
+2. Triage: is it (a) a real regression this change introduced, or (b) a test whose expectation legitimately changed because the contract changed on purpose?
+   - (a) → fix the code at its source, push to the same PR branch.
+   - (b) → update the test to assert the new contract (don't delete it to get green).
+3. Re-run `:app:testDebugUnitTest` until green, then continue.
+
+Same no-deploy caveat as 5.9b — a red suite on main doesn't immediately ship, but it rots and hides the next regression. Don't merge "to fix later," and don't `@Ignore` a failing test as a shortcut to green.
+
 ## Step 6 — Merge
 
 Once all Critical and Important issues are resolved:
@@ -1084,6 +1121,7 @@ Output a structured report in this exact shape — the user should be able to gr
 | Rules tests | <ran / skipped — why> |
 | iOS build | <SUCCEEDED / FAILED / N/A> |
 | Android build (Step 5.9b) | <SUCCEEDED / FAILED / N/A> |
+| Android unit tests (Step 5.9c) | <N passing / N failing / skipped — why> |
 | iOS UITest (Step 5.6) | <ran / skipped — why> |
 | Visual smoke test (Step 5.5) | <ran / skipped — why> |
 | CI workflow on the merged PR | <green / red — link / didn't run — why> |
