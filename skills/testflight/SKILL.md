@@ -133,6 +133,27 @@ Same failure modes as iOS, plus:
 - **Embedded extension platform mismatch** — if an iOS-only extension (e.g. a Live Activity widget) tries to embed in the Mac variant: `platformFilter: iOS` is missing on its `dependencies:` entry in `project.yml`. Fix the spec, re-run `xcodegen generate`, retry.
 - **Mac Catalyst App Store profile missing** — `ios/ExportOptions.macOS.plist` references named profiles in Apple Developer Portal. If this is the first Mac upload and the plist still has `REPLACE_WITH_MAC_CATALYST_*` placeholders, stop and follow the "Mac Catalyst — one-time Apple Developer Portal setup" section below.
 
+## Step 3c — upload ALL dSYMs to Crashlytics (mandatory)
+
+**Do NOT rely on the in-archive `postBuildScript` alone.** That script runs inside the app target's build and historically only uploaded the main app's dSYM — leaving every embedded extension (`NotificationServiceExtension`, `TrainingLiveActivityWidget`) and every dynamic framework (the Facebook SDK `.framework`s) missing in Crashlytics. That's exactly how the dashboard accumulated "Missing (required)" dSYM warnings. The archive's `dSYMs/` folder is the authoritative, complete set — upload the whole folder explicitly here, every build, so a crash in ANY image symbolicates.
+
+```bash
+# Locate the Firebase upload-symbols tool from any DatingAIAssistant SPM checkout.
+UPLOAD_SYMBOLS=$(find ~/Library/Developer/Xcode/DerivedData -path "*firebase-ios-sdk/Crashlytics/upload-symbols" -type f 2>/dev/null | head -1)
+GSP="/Users/aryaxt/Desktop/Repos/$IOS_SCHEME/ios/$IOS_SCHEME/Resources/GoogleService-Info.plist"
+
+# Upload the ENTIRE dSYMs directory — upload-symbols recurses every *.dSYM in it
+# (app + extensions + frameworks). -p ios covers both iOS and Mac Catalyst builds.
+"$UPLOAD_SYMBOLS" -gsp "$GSP" -p ios "$ARCHIVE_PATH/dSYMs"
+
+# Mac Catalyst archive (only if Step 3b ran) carries its own dSYMs:
+[ -n "${MAC_ARCHIVE_PATH:-}" ] && "$UPLOAD_SYMBOLS" -gsp "$GSP" -p ios "$MAC_ARCHIVE_PATH/dSYMs"
+```
+
+Each `.dSYM` prints `Successfully uploaded Crashlytics symbols`. Sanity-check the count: the iOS archive should yield **6** dSYMs (app, 2 app extensions, 3 Facebook frameworks) — verify with `ls "$ARCHIVE_PATH/dSYMs"`. If `UPLOAD_SYMBOLS` is empty, no archive has resolved the Firebase SPM yet — run the archive (Step 3) once, or `find` a different DerivedData path. **Run this step BEFORE the archive cleanup in Step 5**, since cleanup deletes `$ARCHIVE_PATH`.
+
+> **Recovering a past build's missing dSYMs:** if the dashboard already shows missing UUIDs for an *old* build whose archive was deleted, they are generally unrecoverable — the app ships without bitcode (so App Store Connect has no copy), and a rebuild from the build's `ios-build-<N>` tag only reproduces matching dSYM UUIDs if the toolchain is byte-identical (unreliable). Accept the loss on old builds; this step prevents new ones.
+
 ## Step 4 — export iOS IPA
 
 ```bash
@@ -194,7 +215,7 @@ If you see:
 
 ### Clean up the archive and export after a successful upload
 
-`.xcarchive` bundles are 200–500 MB each and `~/Library/Developer/Xcode/Archives/` accumulates them silently — at one bump per day, that's >10 GB/month of dead disk. Once `altool` returned success the archive and export dir are no longer needed: TestFlight has the IPA/PKG, dSYMs are already in Crashlytics (Step 3 postBuildScript), and the GitHub tag in Step 7 records the source SHA.
+`.xcarchive` bundles are 200–500 MB each and `~/Library/Developer/Xcode/Archives/` accumulates them silently — at one bump per day, that's >10 GB/month of dead disk. Once `altool` returned success the archive and export dir are no longer needed: TestFlight has the IPA/PKG, dSYMs are already in Crashlytics (Step 3c uploaded the whole `dSYMs/` folder), and the GitHub tag in Step 7 records the source SHA.
 
 ```bash
 rm -rf -- "${ARCHIVE_PATH:?ARCHIVE_PATH must be set}" "${EXPORT_DIR:?EXPORT_DIR must be set}"
@@ -339,7 +360,7 @@ After the script runs once, `/testflight` can ship to both platforms without fur
 ## Things to watch for
 
 - **Never push to main from a feature branch as part of this flow.** The build-number commit is allowed because it's a chore commit on main, but per `CLAUDE.md` the user requires PR review for everything else. If there are unpushed feature commits, surface them and ask.
-- **dSYM upload to Crashlytics** runs as a postBuildScript inside the archive — verify in the build log it succeeded (look for "Successfully uploaded Crashlytics dSYMs"). If it fails, Crashlytics will show "missing dSYMs" in the dashboard and you can manually upload from the `.xcarchive/dSYMs/` directory later.
+- **dSYM upload to Crashlytics** happens twice: a best-effort `postBuildScript` inside the archive (uploads the whole `${DWARF_DSYM_FOLDER_PATH}`) AND the authoritative **Step 3c** that uploads the entire `$ARCHIVE_PATH/dSYMs/` folder. Step 3c is the one that guarantees coverage — never skip it. If Crashlytics still shows "missing dSYMs" after a run, re-upload manually from the `.xcarchive/dSYMs/` directory with the `upload-symbols` invocation in Step 3c before deleting the archive.
 - **Don't `xcodebuild clean` before archiving** — it forces a full SwiftPM re-resolution that can take 10+ extra minutes for the Firebase SDK chain. Only clean if you're debugging a stale-build issue.
 - **Build-number monotonicity is per `CFBundleShortVersionString` AND per platform.** Within iOS, all builds for marketing version "1.0" must be strictly increasing. Within macOS, same rule independently. iOS and Mac builds with the same `CFBundleVersion` are fine — they live under separate Build entities in App Store Connect.
 - **Mac builds take longer to process** than iOS — Apple's macOS notarization step adds 5–15 min on top of the standard processing. Don't panic if Step 6's Mac poll sits at `PROCESSING` after the iOS one reached `VALID`.
