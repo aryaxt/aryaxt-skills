@@ -311,6 +311,58 @@ Ask: **does landing this change require a change that is currently an open PR (o
 
 If there are **no** cross-repo/cross-branch dependencies, state that in `## Notes` ("Self-contained: no external dependency PRs") and continue.
 
+## Step 3.11 — Analytics instrumentation check (before review)
+
+A new user-facing feature/flow that ships **without analytics** is a feature we
+can't tell is working; a **new event parameter** that ships without a matching
+GA4 custom dimension is silently un-analyzable (GA4 won't let you break down by an
+unregistered param, and registration is **not retroactive**). Both are easy to
+forget. Full rules: the project's analytics doc (linked from AGENTS.md, e.g.
+`docs/analytics-instrumentation.md`).
+
+```bash
+DIFF_FILES=$(git diff origin/main..HEAD --name-only)
+# Did this diff add/change a user-facing feature/flow/screen/CTA on any platform?
+FEATURE_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E '^(src/app/|src/components/|ios/.*/Views/|android/.*/ui/)' || true)
+# Did it touch the analytics layer on any platform?
+ANALYTICS_FILES=$(echo "$DIFF_FILES" | /usr/bin/grep -E '(firebase/analytics\.ts|Services/AnalyticsService\.swift|services/AnalyticsService\.kt)' || true)
+# New event parameter keys introduced (added lines in the analytics files)?
+NEW_PARAMS=$(git diff origin/main..HEAD -- '*AnalyticsService.swift' '*AnalyticsService.kt' '*firebase/analytics.ts' \
+  | /usr/bin/grep -E '^\+' | /usr/bin/grep -oE '"[a-z][a-z0-9_]+"\s*(to|:)' || true)
+```
+
+Apply three rules:
+
+1. **Feature without analytics.** If `FEATURE_DIFF` is non-empty but
+   `ANALYTICS_FILES` is empty, decide deliberately: does this feature/flow have a
+   funnel step or key action worth measuring (a CTA, a success, a failure, a
+   screen reached)? If yes and it's uninstrumented, flag it **Important** and ask
+   the user — most user-facing flows should emit at least an entry + outcome event.
+   A pure refactor / bug fix / copy tweak legitimately needs none; say so.
+
+2. **Cross-platform analytics drift.** If `ANALYTICS_FILES` touches more than one
+   platform (or the feature ships on multiple platforms), the **event names +
+   param keys must be byte-identical** across iOS / Android / web. Diff the three
+   `AnalyticsService` files against each other for the changed events; any mismatch
+   in event name or param key is a **Critical** finding (it silently splits the
+   shared dashboards). Android's `AnalyticsServiceTest.kt` should also assert the
+   new mappings.
+
+3. **⚠️ New event parameter → GA4 custom dimension reminder (LOUD).** If
+   `NEW_PARAMS` is non-empty, the diff introduced new event parameter key(s). GA4
+   collects them but **cannot filter/break-down by them until each is registered
+   as a custom dimension, and registration is NOT retroactive.** You cannot do this
+   for the user (it's in their Google Analytics account). So:
+   - **Surface an unmissable reminder to the user**, listing each new param key and
+     the exact path: *GA4 → Admin → Data display → Custom definitions → Custom
+     dimensions → Create custom dimension → Scope = Event, Event parameter = `<key>`.*
+   - **Record the pending dimensions in this PR's `## Notes`** ("GA4 dimensions to
+     register before relying on breakdowns: `<key>`, …") so it's not lost at merge.
+   - This is advisory, not a merge blocker — but it MUST be said out loud, every time.
+
+If none of the three apply, state it briefly ("Analytics: no user-facing flow /
+no new events or params") and continue.
+
 ## Step 4 — Parallel multi-agent review
 
 Dispatch review agents **in a single parallel batch** (one Agent tool call per reviewer). Pre-launch, the cost of shipping a bug is much higher than the cost of running extra agents — bias toward running the full fleet.
