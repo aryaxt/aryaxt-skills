@@ -363,6 +363,38 @@ Apply three rules:
 If none of the three apply, state it briefly ("Analytics: no user-facing flow /
 no new events or params") and continue.
 
+## Step 3.12 — User-visible copy: no em/en dashes (before review)
+
+The em-dash (`—`, U+2014) and en-dash (`–`, U+2013) read as an AI-generation "tell"
+and are **banned from all user-visible product copy** (the standing rule lives in
+the project's `CLAUDE.md` → "User-Visible Copy Style"). They sneak in constantly
+because models love them. Catch them on the diff before review.
+
+```bash
+# Added lines in this diff that introduce an em-dash (—) or en-dash (–).
+git diff origin/main..HEAD | /usr/bin/grep -nE '^\+' | /usr/bin/grep -E '—|–' || true
+```
+
+For each hit, decide whether it lands in **text a real end user sees** — UI strings
+(`Text(...)`, Compose strings, JSX), `strings.xml`, marketing/onboarding/landing
+copy, page `<title>`/meta, error/alert/toast/paywall/placeholder copy, and
+**Firestore-seeded copy users read** (quick-fix `description`s, scene/style `name`s,
+app-gate/feedback copy):
+
+- **User-visible → must fix before merge.** Replace with natural punctuation (period
+  to split sentences, comma, colon for an intro/list, parentheses for an aside;
+  hyphen for numeric ranges like `1-3`). Do **not** just swap `—` for `-`. Keep the
+  copy identical across web / iOS / Android. If the string is a Firestore-seeded
+  value, fix the source seed file **and** re-sync the live collection (the served
+  copy comes from Firestore, not the bundled fallback).
+- **Not user-visible → leave as-is.** Code comments, `*.md` docs, `console`/`logError`/
+  analytics/log strings, AI system/generation/enhancer prompts (sent to the model,
+  never shown to users), and a lone `—` used deliberately as an empty-value
+  placeholder glyph (e.g. a blank profile field).
+
+If there are no user-visible hits, state it briefly ("Copy: no em/en dashes in
+user-visible text") and continue.
+
 ## Step 4 — Parallel multi-agent review
 
 Dispatch review agents **in a single parallel batch** (one Agent tool call per reviewer). Pre-launch, the cost of shipping a bug is much higher than the cost of running extra agents — bias toward running the full fleet.
