@@ -142,17 +142,47 @@ Same failure modes as iOS, plus:
 UPLOAD_SYMBOLS=$(find ~/Library/Developer/Xcode/DerivedData -path "*firebase-ios-sdk/Crashlytics/upload-symbols" -type f 2>/dev/null | head -1)
 GSP="/Users/aryaxt/Desktop/Repos/$IOS_SCHEME/ios/$IOS_SCHEME/Resources/GoogleService-Info.plist"
 
-# Upload the ENTIRE dSYMs directory — upload-symbols recurses every *.dSYM in it
-# (app + extensions + frameworks). -p ios covers both iOS and Mac Catalyst builds.
-"$UPLOAD_SYMBOLS" -gsp "$GSP" -p ios "$ARCHIVE_PATH/dSYMs"
+# upload-symbols occasionally HANGS (observed: a segfault, then a 37-min stall that
+# never returned) in headless / git-worktree archive runs — even though it runs fine
+# interactively. A bare call therefore risks either stalling the whole release or
+# (worse) silently not uploading while TestFlight still succeeds — the first sign is
+# then a "Missing dSYM" email days later. So guard it: TIMEOUT every upload, then
+# VERIFY every dSYM confirmed. `timeout(1)` isn't on stock macOS — this perl
+# one-liner (a pending alarm is preserved across exec) is the portable equivalent;
+# `gtimeout` from coreutils works too if it's installed.
+run_with_timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 
+upload_dsyms() {                                   # $1 = a dSYMs folder
+  local folder="$1" expected confirmed
+  expected=$(find "$folder" -name "*.dSYM" -type d 2>/dev/null | wc -l | tr -d ' ')
+  # 300s is ~10x a healthy upload; a hang blows past it and we bail loud.
+  confirmed=$(run_with_timeout 300 "$UPLOAD_SYMBOLS" -gsp "$GSP" -p ios "$folder" 2>&1 \
+                | tee /dev/stderr | grep -c "Successfully uploaded Crashlytics symbols")
+  echo "dSYMs: $confirmed/$expected confirmed in $folder"
+  [ "$expected" -gt 0 ] && [ "$confirmed" -ge "$expected" ]
+}
+
+DSYM_UPLOAD_OK=1
+upload_dsyms "$ARCHIVE_PATH/dSYMs" || DSYM_UPLOAD_OK=0
 # Mac Catalyst archive (only if Step 3b ran) carries its own dSYMs:
-[ -n "${MAC_ARCHIVE_PATH:-}" ] && "$UPLOAD_SYMBOLS" -gsp "$GSP" -p ios "$MAC_ARCHIVE_PATH/dSYMs"
+[ -n "${MAC_ARCHIVE_PATH:-}" ] && { upload_dsyms "$MAC_ARCHIVE_PATH/dSYMs" || DSYM_UPLOAD_OK=0; }
+export DSYM_UPLOAD_OK
 ```
 
-Each `.dSYM` prints `Successfully uploaded Crashlytics symbols`. Sanity-check the count: the iOS archive should yield **6** dSYMs (app, 2 app extensions, 3 Facebook frameworks) — verify with `ls "$ARCHIVE_PATH/dSYMs"`. If `UPLOAD_SYMBOLS` is empty, no archive has resolved the Firebase SPM yet — run the archive (Step 3) once, or `find` a different DerivedData path. **Run this step BEFORE the archive cleanup in Step 5**, since cleanup deletes `$ARCHIVE_PATH`.
+The iOS archive should yield **6** dSYMs (app, 2 app extensions, 3 Facebook frameworks); `expected` is read from the folder so the check self-adjusts if that set changes. If `UPLOAD_SYMBOLS` is empty, no archive has resolved the Firebase SPM yet — run the archive (Step 3) once, or `find` a different DerivedData path. **Run this step BEFORE the archive cleanup in Step 5**, since cleanup deletes `$ARCHIVE_PATH`.
 
-> **Recovering a past build's missing dSYMs:** if the dashboard already shows missing UUIDs for an *old* build whose archive was deleted, they are generally unrecoverable — the app ships without bitcode (so App Store Connect has no copy), and a rebuild from the build's `ios-build-<N>` tag only reproduces matching dSYM UUIDs if the toolchain is byte-identical (unreliable). Accept the loss on old builds; this step prevents new ones.
+**If `DSYM_UPLOAD_OK` ends up `0`, treat it as a blocking, unresolved item — never proceed silently.** The TestFlight upload is independent of this, so the build still ships; but: (a) do NOT delete the archive in the Step-5 cleanup — it holds the only copy of the dSYMs (see the gate there), and (b) surface a loud warning to the user at the very end of the run, e.g.:
+
+> ⚠️ dSYMs were NOT uploaded to Crashlytics for build `$NEW_BUILD` (upload timed out or didn't confirm). Crashes in this build won't symbolicate until you re-run the recovery below. The archive has been kept at `$ARCHIVE_PATH`.
+
+> **Recovering a build's missing dSYMs (current or old):** App Store Connect has **no** downloadable dSYM — the app ships without bitcode, so Apple keeps no copy, and `GET /v1/builds/{id}/buildBundles` 403s under this ASC key's role. The local dSYMs are the only copy, and they usually survive even after the `.xcarchive` is deleted: Xcode leaves them in DerivedData at `…/DerivedData/<proj-hash>/Build/Intermediates.noindex/ArchiveIntermediates/$IOS_SCHEME/BuildProductsPath/Release-iphoneos/*.dSYM`. Find the one Crashlytics is asking for by UUID and re-upload — the binary runs fine standalone (the hang is environmental to the headless archive, not a permanent fault):
+> ```bash
+> TARGET=<UUID from the Firebase "Missing dSYM" email>
+> DSYM=$(find ~/Library/Developer/Xcode/DerivedData ~/Library/Developer/Xcode/Archives -name "*.dSYM" -type d 2>/dev/null \
+>          | while read -r d; do dwarfdump --uuid "$d" 2>/dev/null | grep -qi "$TARGET" && echo "$d"; done | head -1)
+> "$UPLOAD_SYMBOLS" -gsp "$GSP" -p ios "$DSYM"   # then upload the sibling extension/framework dSYMs in the same folder too
+> ```
+> Only truly unrecoverable if DerivedData was also cleared since the build (a rebuild from the `ios-build-<N>` tag only reproduces a matching UUID if the toolchain is byte-identical — unreliable).
 
 ## Step 4 — export iOS IPA
 
@@ -215,15 +245,23 @@ If you see:
 
 ### Clean up the archive and export after a successful upload
 
-`.xcarchive` bundles are 200–500 MB each and `~/Library/Developer/Xcode/Archives/` accumulates them silently — at one bump per day, that's >10 GB/month of dead disk. Once `altool` returned success the archive and export dir are no longer needed: TestFlight has the IPA/PKG, dSYMs are already in Crashlytics (Step 3c uploaded the whole `dSYMs/` folder), and the GitHub tag in Step 7 records the source SHA.
+`.xcarchive` bundles are 200–500 MB each and `~/Library/Developer/Xcode/Archives/` accumulates them silently — at one bump per day, that's >10 GB/month of dead disk. Once `altool` returned success the export dir is no longer needed: TestFlight has the IPA/PKG and the GitHub tag in Step 7 records the source SHA. The **archive** is only safe to drop once Step 3c also confirmed the dSYM upload (`DSYM_UPLOAD_OK=1`) — otherwise it holds the only copy of the dSYMs (App Store Connect has none), so keep it for the recovery in Step 3c.
 
 ```bash
-rm -rf -- "${ARCHIVE_PATH:?ARCHIVE_PATH must be set}" "${EXPORT_DIR:?EXPORT_DIR must be set}"
-# Mac variant — only if the Mac archive/export were created in Steps 3b/4b.
-[ -n "${MAC_ARCHIVE_PATH:-}" ] && rm -rf -- "${MAC_ARCHIVE_PATH:?}" "${MAC_EXPORT_DIR:?}"
+# The export dir is always safe to drop — the IPA/PKG is on TestFlight now.
+rm -rf -- "${EXPORT_DIR:?EXPORT_DIR must be set}"
+[ -n "${MAC_EXPORT_DIR:-}" ] && rm -rf -- "${MAC_EXPORT_DIR:?}"
+
+# Drop the archive(s) ONLY if Step 3c confirmed the dSYM upload; else keep them.
+if [ "${DSYM_UPLOAD_OK:-1}" = 1 ]; then
+  rm -rf -- "${ARCHIVE_PATH:?ARCHIVE_PATH must be set}"
+  [ -n "${MAC_ARCHIVE_PATH:-}" ] && rm -rf -- "${MAC_ARCHIVE_PATH:?}"
+else
+  echo "⚠️ Keeping $ARCHIVE_PATH — dSYM upload was not confirmed (see Step 3c recovery)."
+fi
 ```
 
-The `${VAR:?...}` form aborts (instead of degrading to `rm -rf ""`) if either variable was never assigned in this shell session, and the `--` end-of-options sentinel keeps a path that begins with `-` from being parsed as a flag. Only run this after `altool` printed `No errors uploading…`. If the upload failed, keep the archive — re-exporting from a fresh archive takes 5–10 minutes.
+The `${VAR:?...}` form aborts (instead of degrading to `rm -rf ""`) if a variable was never assigned in this shell session, and the `--` end-of-options sentinel keeps a path that begins with `-` from being parsed as a flag. Only run this after `altool` printed `No errors uploading…`. If the upload failed, keep everything — re-exporting from a fresh archive takes 5–10 minutes.
 
 ## Step 6 — assign build to test groups, submit for beta review, notify testers
 
@@ -360,7 +398,7 @@ After the script runs once, `/testflight` can ship to both platforms without fur
 ## Things to watch for
 
 - **Never push to main from a feature branch as part of this flow.** The build-number commit is allowed because it's a chore commit on main, but per `CLAUDE.md` the user requires PR review for everything else. If there are unpushed feature commits, surface them and ask.
-- **dSYM upload to Crashlytics** happens twice: a best-effort `postBuildScript` inside the archive (uploads the whole `${DWARF_DSYM_FOLDER_PATH}`) AND the authoritative **Step 3c** that uploads the entire `$ARCHIVE_PATH/dSYMs/` folder. Step 3c is the one that guarantees coverage — never skip it. If Crashlytics still shows "missing dSYMs" after a run, re-upload manually from the `.xcarchive/dSYMs/` directory with the `upload-symbols` invocation in Step 3c before deleting the archive.
+- **dSYM upload to Crashlytics** happens twice: a best-effort `postBuildScript` inside the archive (uploads the whole `${DWARF_DSYM_FOLDER_PATH}`) AND the authoritative **Step 3c** that uploads the entire `$ARCHIVE_PATH/dSYMs/` folder. Step 3c is the one that guarantees coverage — never skip it, and never let it fail silently: it now caps each upload with a timeout and verifies every dSYM confirmed (`DSYM_UPLOAD_OK`), the Step-5 cleanup keeps the archive when that flag is `0`, and an unconfirmed upload must be surfaced loudly at the end of the run (this is exactly how build 20260620 shipped without dSYMs and triggered a "Missing dSYM" email — the upload hung and the gap was buried). If Crashlytics still shows "missing dSYMs" after a run, use the **Recovering a build's missing dSYMs** recovery in Step 3c (find the dSYM by UUID in DerivedData / the archive, then re-`upload-symbols` it).
 - **Don't `xcodebuild clean` before archiving** — it forces a full SwiftPM re-resolution that can take 10+ extra minutes for the Firebase SDK chain. Only clean if you're debugging a stale-build issue.
 - **Build-number monotonicity is per `CFBundleShortVersionString` AND per platform.** Within iOS, all builds for marketing version "1.0" must be strictly increasing. Within macOS, same rule independently. iOS and Mac builds with the same `CFBundleVersion` are fine — they live under separate Build entities in App Store Connect.
 - **Mac builds take longer to process** than iOS — Apple's macOS notarization step adds 5–15 min on top of the standard processing. Don't panic if Step 6's Mac poll sits at `PROCESSING` after the iOS one reached `VALID`.
