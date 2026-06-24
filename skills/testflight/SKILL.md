@@ -113,7 +113,7 @@ test -f ios/ExportOptions.macOS.plist && echo "ship mac too" || echo "ios only"
 ```
 
 - **`ios only`** — a genuinely iOS-only app (no Catalyst). Skip Steps 3b/4b/5b/6-Mac and proceed to Step 4.
-- **`ship mac too`** — shipping Mac is **MANDATORY and all-or-nothing for the rest of this run.** Once detected, the run ships BOTH platforms or it is a FAILED run. You may NOT proceed past this point with iOS only because the Mac archive/export/upload errored, because Mac "is still processing," or because it seems like extra work. If any Mac step (3b/4b/5b) fails, treat the WHOLE run as failed: stop, surface the Mac error loudly, do NOT report iOS as a success, and do NOT delete archives (Step 5 cleanup is skipped). Apps that ship Mac must never silently degrade to iOS-only — that is exactly the bug that strands the macOS App on a stale build while iOS moves ahead.
+- **`ship mac too`** — shipping Mac is **MANDATORY and all-or-nothing for the rest of this run.** Once detected, the run ships BOTH platforms or it is a FAILED run. You may NOT proceed past this point with iOS only because the Mac archive/export/upload errored, because Mac "is still processing," or because it seems like extra work. If any Mac **upload leg** (3b archive / 4b export / 5b upload) fails, treat the WHOLE run as failed: stop, surface the Mac error loudly, do NOT report iOS as a success, and do NOT delete archives (Step 5 cleanup is skipped). (The Step 6 Mac group-assignment is the one exception — it's idempotent and re-runnable via `asc-assign-build.mjs --platform=MAC_OS`, so a failure THERE doesn't invalidate an already-uploaded Mac binary; just re-run it. The all-or-nothing gate is about getting BOTH binaries onto TestFlight.) Apps that ship Mac must never silently degrade to iOS-only — that is exactly the bug that strands the macOS App on a stale build while iOS moves ahead.
 
 > ⚠️ If you expected `ship mac too` but got `ios only` on a project known to ship Mac (e.g. the macOS App already has builds in App Store Connect), STOP — the plist is missing/untracked. Do not ship iOS alone; restore `ios/ExportOptions.macOS.plist` first.
 
@@ -165,10 +165,17 @@ upload_dsyms() {                                   # $1 = a dSYMs folder
   # architecture <arch> ... in dSYM: <path>") — NOT "Successfully uploaded
   # Crashlytics symbols", which prints exactly ONCE per folder run as a summary
   # and would make confirmed=1 even on a fully successful 6-dSYM upload (a false
-  # DSYM_UPLOAD_OK=0). A Mac Catalyst archive emits >1 line per dSYM (one per
-  # arch slice: x86_64 + arm64), so `confirmed >= expected` still holds.
+  # DSYM_UPLOAD_OK=0). Count UNIQUE dSYM bundles, not raw lines: a Mac Catalyst
+  # archive is fat and emits one line PER ARCH SLICE (x86_64 + arm64) per dSYM,
+  # so a raw line count would let a partial upload (3 of 5 dSYMs = 6 lines >= 5)
+  # false-pass. `sort -u` on the bundle path collapses the slices so confirmed ==
+  # distinct dSYMs actually uploaded, exact on both platforms.
+  # NOTE: the gate is THIS count, not upload-symbols' exit code — `grep` swallows
+  # the tool's exit status through the pipe, so the bundle count is the only
+  # correctness signal here (intentional).
   confirmed=$(run_with_timeout 300 "$UPLOAD_SYMBOLS" -gsp "$GSP" -p ios "$folder" 2>&1 \
-                | tee /dev/stderr | grep -c "Successfully submitted symbols")
+                | tee /dev/stderr | grep "Successfully submitted symbols" \
+                | grep -oE 'in dSYM: .*\.dSYM' | sort -u | wc -l | tr -d ' ')
   echo "dSYMs: $confirmed submitted / $expected expected in $folder"
   [ "$expected" -gt 0 ] && [ "$confirmed" -ge "$expected" ]
 }
