@@ -104,13 +104,18 @@ Run with `run_in_background: true` and monitor — archives take 5–10 minutes.
 - **Swift package resolution timeout**: rerun, or `rm -rf ~/Library/Developer/Xcode/DerivedData/$IOS_SCHEME-*` and retry
 - **Crashlytics dSYM upload script** failing on missing `GoogleService-Info.plist` — should not happen on `main`
 
-## Step 3b — archive Mac Catalyst (if applicable)
+## Step 3b — archive Mac Catalyst (MANDATORY when the Mac export plist exists)
 
-**Run this step only if `ios/ExportOptions.macOS.plist` exists.** Apps without Mac Catalyst support skip it entirely and proceed to Step 4. Check with:
+The presence of `ios/ExportOptions.macOS.plist` auto-detects a Mac Catalyst app. Detect it once:
 
 ```bash
 test -f ios/ExportOptions.macOS.plist && echo "ship mac too" || echo "ios only"
 ```
+
+- **`ios only`** — a genuinely iOS-only app (no Catalyst). Skip Steps 3b/4b/5b/6-Mac and proceed to Step 4.
+- **`ship mac too`** — shipping Mac is **MANDATORY and all-or-nothing for the rest of this run.** Once detected, the run ships BOTH platforms or it is a FAILED run. You may NOT proceed past this point with iOS only because the Mac archive/export/upload errored, because Mac "is still processing," or because it seems like extra work. If any Mac step (3b/4b/5b) fails, treat the WHOLE run as failed: stop, surface the Mac error loudly, do NOT report iOS as a success, and do NOT delete archives (Step 5 cleanup is skipped). Apps that ship Mac must never silently degrade to iOS-only — that is exactly the bug that strands the macOS App on a stale build while iOS moves ahead.
+
+> ⚠️ If you expected `ship mac too` but got `ios only` on a project known to ship Mac (e.g. the macOS App already has builds in App Store Connect), STOP — the plist is missing/untracked. Do not ship iOS alone; restore `ios/ExportOptions.macOS.plist` first.
 
 The Mac archive is a SEPARATE binary (`.app` packaged as `.pkg` for upload) — App Store Connect tracks it as a distinct Build entity under the macOS platform, even though it carries the same `CFBundleVersion` you bumped in Step 2.
 
@@ -199,7 +204,7 @@ xcodebuild \
 
 The IPA lands at `$EXPORT_DIR/$IOS_SCHEME.ipa`.
 
-## Step 4b — export Mac Catalyst .pkg (if applicable)
+## Step 4b — export Mac Catalyst .pkg (MANDATORY when shipping Mac)
 
 ```bash
 MAC_EXPORT_DIR="$HOME/Library/Developer/Xcode/Archives/export-mac-$(date +%Y%m%d-%H%M%S)"
@@ -226,7 +231,7 @@ xcrun altool --upload-app \
 
 `altool` validates and uploads in one shot, ~3–5 minutes. Success returns `No errors uploading...` and an upload UUID. The build then takes another 10–30 minutes server-side to finish processing before it appears in TestFlight (and another wait if export compliance is needed).
 
-## Step 5b — upload Mac Catalyst to TestFlight (if applicable)
+## Step 5b — upload Mac Catalyst to TestFlight (MANDATORY when shipping Mac)
 
 ```bash
 xcrun altool --upload-app \
@@ -364,7 +369,7 @@ Notes:
 
 After the upload command returns success:
 1. Tell the user the build number that shipped (e.g. "Build 20260426 uploaded")
-2. If you shipped both platforms, say so explicitly: "iOS + Mac Catalyst builds 20260426 uploaded"
+2. **If Step 3b detected `ship mac too`, you MUST have uploaded BOTH legs — report them together: "iOS + Mac Catalyst builds 20260426 uploaded."** Never report this run as successful with only the iOS leg uploaded when Mac was applicable; an iOS-only result on a Catalyst app is a FAILED run, not a partial success. If the Mac leg did not upload, say so loudly and treat the run as incomplete.
 3. Note that App Store Connect needs ~10–30 min to process before testers see it (Mac usually trails iOS by 5–10 min)
 4. Confirm that the build was assigned to "main" (internal) and "External testers" groups and that testers will be notified automatically
 5. Link to [appstoreconnect.apple.com/apps](https://appstoreconnect.apple.com/apps) so they can watch processing
@@ -397,6 +402,7 @@ After the script runs once, `/testflight` can ship to both platforms without fur
 
 ## Things to watch for
 
+- **Mac Catalyst is all-or-nothing, never a silent skip.** If `ios/ExportOptions.macOS.plist` exists (Step 3b detects `ship mac too`), the run ships BOTH iOS and Mac or it FAILS — there is no valid "iOS shipped, Mac skipped/failed, call it done" outcome. A Mac archive/export/upload error blocks the whole run: surface it loudly, keep the archives, and do not claim success. This is the exact failure that leaves the macOS App stuck on a stale build (e.g. the 1 AM `20260623` build) while iOS advances to `20260623.1` — the user has explicitly required both every time for this app.
 - **Never push to main from a feature branch as part of this flow.** The build-number commit is allowed because it's a chore commit on main, but per `CLAUDE.md` the user requires PR review for everything else. If there are unpushed feature commits, surface them and ask.
 - **dSYM upload to Crashlytics** happens twice: a best-effort `postBuildScript` inside the archive (uploads the whole `${DWARF_DSYM_FOLDER_PATH}`) AND the authoritative **Step 3c** that uploads the entire `$ARCHIVE_PATH/dSYMs/` folder. Step 3c is the one that guarantees coverage — never skip it, and never let it fail silently: it now caps each upload with a timeout and verifies every dSYM confirmed (`DSYM_UPLOAD_OK`), the Step-5 cleanup keeps the archive when that flag is `0`, and an unconfirmed upload must be surfaced loudly at the end of the run (this is exactly how build 20260620 shipped without dSYMs and triggered a "Missing dSYM" email — the upload hung and the gap was buried). If Crashlytics still shows "missing dSYMs" after a run, use the **Recovering a build's missing dSYMs** recovery in Step 3c (find the dSYM by UUID in DerivedData / the archive, then re-`upload-symbols` it).
 - **Don't `xcodebuild clean` before archiving** — it forces a full SwiftPM re-resolution that can take 10+ extra minutes for the Firebase SDK chain. Only clean if you're debugging a stale-build issue.
