@@ -161,9 +161,15 @@ upload_dsyms() {                                   # $1 = a dSYMs folder
   local folder="$1" expected confirmed
   expected=$(find "$folder" -name "*.dSYM" -type d 2>/dev/null | wc -l | tr -d ' ')
   # 300s is ~10x a healthy upload; a hang blows past it and we bail loud.
+  # Count the PER-dSYM success line ("Successfully submitted symbols for
+  # architecture <arch> ... in dSYM: <path>") — NOT "Successfully uploaded
+  # Crashlytics symbols", which prints exactly ONCE per folder run as a summary
+  # and would make confirmed=1 even on a fully successful 6-dSYM upload (a false
+  # DSYM_UPLOAD_OK=0). A Mac Catalyst archive emits >1 line per dSYM (one per
+  # arch slice: x86_64 + arm64), so `confirmed >= expected` still holds.
   confirmed=$(run_with_timeout 300 "$UPLOAD_SYMBOLS" -gsp "$GSP" -p ios "$folder" 2>&1 \
-                | tee /dev/stderr | grep -c "Successfully uploaded Crashlytics symbols")
-  echo "dSYMs: $confirmed/$expected confirmed in $folder"
+                | tee /dev/stderr | grep -c "Successfully submitted symbols")
+  echo "dSYMs: $confirmed submitted / $expected expected in $folder"
   [ "$expected" -gt 0 ] && [ "$confirmed" -ge "$expected" ]
 }
 
