@@ -42,6 +42,29 @@ optional `$IOS_SIM_BUILD_CACHE` / `$IOS_DEVICE_BUILD_CACHE` /
 Skills MUST source this file before using the variables. Don't bake
 project-specific values into the skill markdown.
 
+The bundled `appium` MCP server follows the same philosophy: the
+plugin ships the launcher + server registration, but the app-specific
+capabilities (bundle id, package, launcher activity) come from each
+project's `.claude/appium/capabilities.json`, referenced via
+`${CLAUDE_PROJECT_DIR}`. Don't bake a project's app ids into the plugin.
+
+## Bundled MCP servers
+
+The plugin-root `.mcp.json` declares MCP servers that start when the
+plugin is enabled (`mcp/<name>/` holds their launchers/assets):
+
+- `appium` — mobile UI automation (`appium-mcp`) for driving the iOS
+  simulator / Android emulator. Launcher `mcp/appium/appium-mcp.sh`
+  resolves Node (nvm) + `ANDROID_HOME` and execs the global install
+  (`npm i -g appium-mcp@latest`). Per-project caps via
+  `${CLAUDE_PROJECT_DIR}/.claude/appium/capabilities.json`
+  (template: `mcp/appium/capabilities.example.json`).
+
+When you add/change a bundled MCP server, update the README's
+"Bundled MCP servers" table in the same commit (same rule as skills).
+MCP/`.mcp.json` changes need `/reload-plugins` or a restart to take
+effect — they don't hot-reload like `SKILL.md`.
+
 ## Versioning
 
 Tag scheme: `vMAJOR.MINOR.PATCH` (`v0.1.0`, `v0.2.0`, etc.). Manifest

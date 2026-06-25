@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "appium": {
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/appium/appium-mcp.sh"],
+      "env": {
+        "CAPABILITIES_CONFIG": "${CLAUDE_PROJECT_DIR}/.claude/appium/capabilities.json",
+        "SCREENSHOTS_DIR": "/tmp/appium-screenshots"
+      }
+    }
+  }
+}

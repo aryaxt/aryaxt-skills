@@ -67,6 +67,34 @@ If you don't have `scripts/ios-config.sh` yet, either create one (copy
 from any saas-template-based project) or export the variables in your
 shell rc.
 
+## Bundled MCP servers
+
+The plugin also ships MCP servers (declared in the plugin-root `.mcp.json`),
+which start automatically when the plugin is enabled and prompt once for
+per-server approval, same as a project `.mcp.json`.
+
+| Server | What it does |
+|---|---|
+| `appium` | Mobile UI automation via [`appium-mcp`](https://github.com/appium/appium-mcp). Drive the running app on an iOS simulator or Android emulator (navigate, tap, type, read page source, screenshot) to verify a feature on device — the mobile analog of the web `preview_*` tools used by `/qa`. 31 tools (`select_device`, `prepare_ios_simulator`, `appium_find_element`, `appium_gesture`, `appium_set_value`, `appium_get_page_source`, `appium_app_lifecycle`, `appium_screenshot`, …). |
+
+**One-time setup per machine** (under Node ≥ 22, since Appium 3 needs
+`^20.19 || ^22.12 || >=24`):
+
+```bash
+npm install -g appium-mcp@latest
+```
+
+The launcher (`mcp/appium/appium-mcp.sh`) sources nvm to pick a compatible
+Node, autodetects `ANDROID_HOME`, and execs the global install (falling back
+to `npx` with an install hint if it's missing).
+
+**Per-project capabilities.** The server reads each project's
+`.claude/appium/capabilities.json` (via `CAPABILITIES_CONFIG=${CLAUDE_PROJECT_DIR}/...`)
+for the app's bundle id / package — same per-project-config philosophy as
+`scripts/ios-config.sh`. Copy [`mcp/appium/capabilities.example.json`](mcp/appium/capabilities.example.json)
+into your project and fill in the ids. A missing file is tolerated (the server
+boots without defaults; you then pass ids when creating a session).
+
 ## What's NOT in here
 
 Project-specific skills stay in the project's `.claude/skills/`:

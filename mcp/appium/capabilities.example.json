@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy this to your project's .claude/appium/capabilities.json and fill in the app's ids. The Appium MCP server reads it via CAPABILITIES_CONFIG=${CLAUDE_PROJECT_DIR}/.claude/appium/capabilities.json. Attaches to the INSTALLED app (no apk/ipa path); device selection is dynamic via the select_device / prepare_ios_simulator tools. A missing file is tolerated (the server boots without defaults).",
+  "ios": {
+    "platformName": "iOS",
+    "appium:automationName": "XCUITest",
+    "appium:bundleId": "com.example.yourapp",
+    "appium:noReset": true
+  },
+  "android": {
+    "platformName": "Android",
+    "appium:automationName": "UiAutomator2",
+    "appium:appPackage": "com.example.yourapp",
+    "appium:appActivity": "com.example.yourapp.MainActivity",
+    "appium:noReset": true
+  }
+}
