@@ -129,7 +129,11 @@ try {
   console.log(`assigned versionCode ${versionCode} to track "${track}" (status=${release.status}${release.userFraction ? `, rollout=${release.userFraction}` : ""})`);
 
   // 4) Commit — nothing above is live until this succeeds.
-  const committed = await androidpublisher.edits.commit({ packageName, editId });
+  // changesNotSentForReview: true is REQUIRED for review-gated apps — otherwise
+  // the Publishing API rejects the commit with HTTP 400 ("Changes cannot be sent
+  // for review automatically..."). With it set, the edit commits and the build is
+  // sent for review from the Play Console as usual.
+  const committed = await androidpublisher.edits.commit({ packageName, editId, changesNotSentForReview: true });
   editId = null; // committed edits must not be deleted
   console.log(`committed edit ${committed.data.id} — versionCode ${versionCode} is live on "${track}".`);
   console.log(`Play is now processing the bundle. Watch: https://play.google.com/console`);
