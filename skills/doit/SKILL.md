@@ -395,6 +395,20 @@ app-gate/feedback copy):
 If there are no user-visible hits, state it briefly ("Copy: no em/en dashes in
 user-visible text") and continue.
 
+## Step 3.13 — Mac Catalyst photo upload/download (before review)
+
+If the diff touches photo **upload** (image/file pickers) or **download/save**
+on iOS, remember the Mac Catalyst rule: on Mac, both directions must offer
+**Finder AND Photos as an additive chooser** ("Choose Files… / Photos Library…"
+for upload, "Save to Photos / Save to Files…" for download) — never force one.
+Saving to Photos on Mac matters because iCloud syncs it back to the user's
+iPhone/iPad. **iPhone/iPad must stay byte-for-byte unchanged**: every fork is
+`#if targetEnvironment(macCatalyst)` with the original behavior in `#else`, and
+new `.fileImporter`/`.fileExporter`/`.confirmationDialog` modifiers stay inert
+on iOS (their trigger state is only set on Mac). No new entitlement needed —
+`com.apple.security.files.user-selected.read-write` is already present. See
+`docs/features/upload-menu.md`.
+
 ## Step 4 — Parallel multi-agent review
 
 Dispatch review agents **in a single parallel batch** (one Agent tool call per reviewer). Pre-launch, the cost of shipping a bug is much higher than the cost of running extra agents — bias toward running the full fleet.
