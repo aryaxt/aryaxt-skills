@@ -17,10 +17,39 @@ Argument can be:
 - `all` — runs both iPhone and iPad sequentially (not parallel; they share derived data and would race) → **iOS path**
 - `android` (or `emulator`) — latest available Android emulator → **Android path** (jump to the "Android" section near the end of this skill)
 - `mac` — **not yet supported.** Tell the user it's a follow-up and ask them to pick `iphone`, `ipad`, or `android`. (The "Designed for iPad" pipeline needs end-to-end verification before we wire it up.)
+- `session` (optionally `session iphone`) — opt-in: build/run on a simulator dedicated to THIS Claude session, cloned from a one-time logged-in "golden" sim so it starts already signed in. Lets parallel sessions each keep their own sim. See **"Session mode"** just below. Without `session`, behavior is exactly as documented in Steps 2–8 (shared default device) — nothing changes.
 
 Anything else: treat as a literal device/AVD name. If it looks like an Android AVD (matches `adb`/`emulator -list-avds`), take the Android path; otherwise pass through to the iOS simulator picker as the explicit name.
 
 > **Android prerequisite:** the Android path only works once the `android/` Gradle project exists (Foundation layer — see `docs/superpowers/specs/2026-06-01-android-port-foundation-design.md`). If `android/` is absent, tell the user the Android app hasn't been scaffolded yet and stop — don't try to build a project that isn't there.
+
+## Session mode (`/simulator session`) — a sim per Claude session, already logged in
+
+Only when the user passed `session`. This is the sole difference; plain `/simulator` is unaffected. The single change vs the normal flow: instead of picking a shared device in Step 2, use a simulator named after this worktree/branch (`cc-sim-<worktree>`), cloned from a one-time logged-in "golden" so it starts already signed in (no repeat Google/2FA login). Everything else (build, dev server, install, launch) is identical to the normal Steps below.
+
+Requires `scripts/session-sim.sh`. If it's missing, tell the user this project hasn't wired up session mode and fall back to normal. `session` applies to the iPhone family only.
+
+**First-run auto-setup (do this check first):** if no golden sim exists yet, the user has never logged in. Set it up for them automatically — don't make them know the command:
+
+```bash
+if ! xcrun simctl list devices | grep -q "cc-sim-golden"; then
+  bash scripts/session-sim.sh setup-golden   # builds, installs, opens the golden sim
+  # Then tell the user: "Log into Google once in the simulator that just opened,
+  # then run /simulator session again." and STOP here.
+fi
+```
+
+After they've logged in once, every `/simulator session` just clones that signed-in sim.
+
+**Normal run (golden exists) — in Step 2, replace `pick_udid` with:**
+
+```bash
+UDID=$(bash scripts/session-sim.sh udid)   # this session's sim, cloned from the logged-in golden
+```
+
+Then continue Steps 3–8 exactly as written (open Simulator, boot `$UDID`, symlink, dev server, build into the standard DerivedData, install + launch to `$UDID`). In Step 8 name the session sim.
+
+**Cleanup (manual):** `bash scripts/session-sim.sh reap` deletes session sims whose worktree is gone (never the golden).
 
 ## Step 2 — pick the simulator UDID
 
@@ -54,7 +83,13 @@ pick_udid() {
   '
 }
 
-UDID=$(pick_udid "iPhone" "${PREFERRED_IPHONE[@]}")  # or "iPad" + PREFERRED_IPAD
+# Sticky session sim: if an earlier `/simulator session` already created a sim
+# for this worktree, keep using it even without the `session` arg. The user will
+# say in plain words when they want a fresh/standard device instead — only then
+# skip this and use pick_udid.
+STICKY=""
+[ -x scripts/session-sim.sh ] && STICKY=$(bash scripts/session-sim.sh active)
+UDID="${STICKY:-$(pick_udid "iPhone" "${PREFERRED_IPHONE[@]}")}"  # iPad: use PREFERRED_IPAD
 ```
 
 If `$UDID` is empty: surface "no iPhone (or iPad) simulator installed — install one via Xcode → Settings → Platforms" and stop. Don't fall back to a different family.
