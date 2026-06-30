@@ -44,10 +44,15 @@ Read the changed/relevant files and build a mental model of the flow **before to
 1. **Entry point → affected screen.** Trace how a user reaches the changed UI from app launch: which tab, which button opens which sheet, what state is required (logged in? has a model? has credits?). Write this out as a concrete numbered navigation plan — this is the script you'll execute on the device.
 2. **What to assert.** For each step, decide what the screenshot should show to prove it works (a specific title, a new button, the sheet height, a badge count, an error card).
 3. **Pre-conditions.** If the flow needs seeded state (a trained model, credits, a published post), note how to get there (an existing golden account, a debug menu action, a Firestore seed). Prefer reusing existing app state over fabricating it.
-4. **Decide which diagrams to include** (authored in Step 6, rendered in the report):
-   - **Class / interaction diagram** — when the changed code is non-trivial (several collaborating types, a new service, a provider/adapter, a state machine). A Mermaid `classDiagram` or `sequenceDiagram` of the real types involved, not a generic sketch.
+4. **Impact analysis — what *else* does this change touch?** Don't only test the screen that changed; test everything the change can affect. From the code, trace outward:
+   - **Find the dependents.** For each changed type/function/route/field, grep for its call sites and importers (`grep -rn "<symbol>"` across `ios/`, `android/`, `src/`). A shared service, a model field, a util, an API route, or a changed server contract can ripple into screens far from the diff.
+   - **Shared/server changes fan out to every client.** A change to an API route, response shape, Firestore field, or a shared `src/lib` module affects **iOS, Android, and web** at once — each consuming client is now in scope, even if only the server file changed.
+   - **List the affected flows** and fold them into the navigation plan from #1: drive and screenshot **each** affected flow, not just the headline one. If a change touches credits, also verify a flow that spends credits elsewhere; if it touches the model list, verify every screen that reads it. Call out explicitly in the report which flows you exercised *because they were downstream of the change*.
+   - If the blast radius is large, prioritize the highest-risk dependents and **state in the report which affected flows you did and did not cover**, with why.
+5. **Decide which diagrams to include** (authored in Step 6, rendered in the report):
+   - **Class / interaction diagram — REQUIRED whenever the change touches backend/server code non-trivially** (`src/app/api`, `src/lib`, services, providers, a changed server contract — i.e. more than one collaborating type, a new service/route, or a contract change; a one-line tweak to an existing handler doesn't qualify), and recommended whenever any surface's changed code is non-trivial (several collaborating types, a new service, a provider/adapter, a state machine). Author **one diagram per affected surface** — iOS, Android, web, backend — using the real types in that surface's code, not a generic sketch. A Mermaid `classDiagram` for structure, `sequenceDiagram` for a cross-layer call flow (e.g. client → API route → service → provider). When a flow crosses platforms (client → shared backend), a sequence diagram that spans them is ideal. Don't pad: only include a surface's diagram if that surface's code actually changed or is materially involved.
    - **Database / schema diagram** — when the feature **adds or changes persisted data** (a new Firestore collection, new fields, new indexes, a Storage path). A Mermaid `erDiagram` of the collections + key fields + relationships, plus a note on the security-rules surface.
-   - Skip diagrams for small/obvious changes — they should earn their place.
+   - Skip diagrams only for small/obvious changes with no backend involvement — otherwise they earn their place.
 
 This step is where `/qa` earns its keep: it figures the path out itself, so you never have to write steps in a doc.
 
@@ -111,12 +116,57 @@ The report must let the user *understand how it was tested and see how the UI lo
 2. **Summary** — 2-4 sentences: what was changed/broken, what was tested, the outcome.
 3. **The path taken** — a numbered timeline. **Each step = its screenshot inline + a caption** describing the action and what the screenshot proves. This is the heart of the report; make it readable as a story.
 4. **Before / after** (bug mode) — the broken state next to the fixed state.
-5. **Diagrams** (when Step 3 flagged them) — render Mermaid via CDN (`https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js`, `mermaid.initialize({startOnLoad:true, theme:'dark'})`). Author real `classDiagram` / `sequenceDiagram` / `erDiagram` source from the actual code, with a sentence explaining each.
-6. **API calls** (when triggered) — request + response, pretty-printed, secrets redacted.
-7. **Root cause + fix** (bug mode) — the root-cause statement and a short summary of the change (link the touched files).
-8. **Verdict / notes** — what passed, anything not covered, follow-ups.
+5. **Affected functionality** — the downstream flows from Step 3 #4 that you exercised because the change rippled into them, each with its screenshots and a note on *why* it was in scope. Make it clear these are impact-coverage, not the headline flow.
+6. **Diagrams** (when Step 3 flagged them) — render Mermaid via CDN (`https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js`, `mermaid.initialize({startOnLoad:true, theme:'dark'})`). Author real `classDiagram` / `sequenceDiagram` / `erDiagram` source from the actual code, with a sentence explaining each. When the change touches backend, include the **per-surface class/interaction diagrams** (iOS, Android, web, backend) plus a cross-layer sequence diagram for the request flow.
+7. **API calls** (when triggered) — request + response, pretty-printed, secrets redacted.
+8. **Root cause + fix** (bug mode) — the root-cause statement and a short summary of the change (link the touched files).
+9. **Verdict / notes** — what passed, anything not covered, follow-ups.
+
+### Multi-platform reports — segment by platform
+
+When the run covers **more than one platform** (e.g. a backend change verified on iOS + Android + web), put a **segmented control at the top of the report** with one segment per platform involved (iOS · Android · Web · Backend), and show only the selected platform's sections (path taken, screenshots, affected functionality, that surface's class diagram) at a time. Shared sections (header, summary, DB/schema diagram, cross-layer sequence diagram, verdict) stay outside the segments. Implement it as plain inline HTML/CSS/JS — labelled buttons that toggle `.active` on `<section data-platform="…">` panels; no framework, keep it in the single self-contained file. Default to the first segment selected. A single-platform run shows **no** segmented control — just the linear report.
 
 **Styling:** dark, product-aligned (navy surface `#0B0B12`, raised `#15151F`, indigo accent `#6E66F0`, white headings, muted body). Generous radii, hairline borders, screenshots in rounded cards with a subtle border. It should look designed, not like a dump. Keep it one self-contained HTML file (inline CSS; Mermaid is the only CDN).
+
+## Step 6.5 — self-review the report before showing it (REQUIRED — do not skip)
+
+**You wrote the HTML; you have not yet seen it rendered.** Never hand the user a report you haven't looked at. Render it, inspect it like a designer, fix every defect, and only then proceed to Step 7. The user should never be the one to discover a broken report.
+
+**Render it and look at it.** Open the file in a real browser engine and capture what it actually looks like — not what you intended:
+
+```
+# Full-page screenshot via headless Chrome (file:// loads local assets/ fine)
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --headless=new --hide-scrollbars --window-size=1400,2200 \
+  --screenshot="/tmp/qa-report-check.png" \
+  "file://$(pwd)/.qa-reports/<dir>/report.html"
+```
+
+Then **Read that screenshot** (the image, not the HTML source) and scan it as a human would. Re-shoot at a second width (e.g. `--window-size=900,2200`) to catch responsive breakage. If a region is taller than one viewport, capture it in sections or raise the height — make sure you've actually seen the whole document, top to bottom.
+
+**The UI-bug checklist** — look for and fix each:
+- **Broken/missing images** — a screenshot card showing a broken-image glyph or empty box means a wrong relative path (`assets/NN-slug.png`) or a file that never got saved. Verify every referenced asset exists on disk and resolves.
+- **Overflow / clipping** — text or images spilling out of cards, horizontal scrollbars, captions cut off, screenshots squashed or stretched (wrong aspect ratio).
+- **Contrast / readability** — body text that's too dark on the dark surface, low-contrast captions, an accent used where it disappears. Everything must be comfortably legible.
+- **Layout** — misaligned cards, collapsed/zero-height containers, broken grid/flow, content colliding with the header, awkward giant gaps.
+- **Mermaid** — diagrams must actually **render to SVG**, not show raw ```` ```mermaid ```` source or an error box. (Headless screenshot may race the CDN — if a diagram looks unrendered, also open it visibly and confirm before blaming the report.) Verify the diagram content matches the real code, not a placeholder.
+- **Empty / placeholder content** — no `TODO`, `lorem`, `undefined`, `[object Object]`, or stub captions left in.
+- **Platform segmented control** (multi-platform reports) — clicking each segment must actually swap to that platform's panel; exactly one panel visible at a time, the default segment shows on load, and no panel is orphaned/hidden-forever. Drive it (open visibly and click each segment, or read the toggle JS) and confirm every platform's content is reachable.
+
+**If the report contains any custom animation or CSS transition, review it frame by frame.** A still screenshot cannot prove an animation is correct. Open the report visibly and capture the motion across time, then inspect the frames:
+
+```
+open -a "Google Chrome" ".qa-reports/<dir>/report.html"
+# capture ~4s of the animated region, then split into frames
+# (use the computer-use screen-record tools, or a timed screenshot burst)
+ffmpeg -i /tmp/qa-anim.mov -vf fps=12 /tmp/qa-frames/f-%03d.png
+```
+
+Read the frame sequence and confirm the animation **starts, runs, and ends cleanly** — no flash of unstyled/jumped first frame, no stutter or snap-back, no element stuck mid-transition, no infinite loop that should have settled, correct easing and final resting state. Fix the CSS/JS and re-capture until the motion is clean. (This applies to animation *inside the report HTML itself* — for animation in the app feature being QA'd, screenshots can't capture it; see "When NOT to use this skill.")
+
+**This sub-step only runs if the report actually has custom animation/transitions** — most reports are static screenshots-in-cards and skip it entirely. If `ffmpeg` (or a screen-record tool) isn't available, fall back to a timed burst of screenshots; if you can't capture motion at all, say so in your summary rather than blocking the report.
+
+**Re-render after every fix** and re-inspect — don't assume the edit worked. Only once the rendered report is clean on every point above do you move to Step 7.
 
 ## Step 7 — open it in Chrome
 
