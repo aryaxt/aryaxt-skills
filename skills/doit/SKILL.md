@@ -228,7 +228,7 @@ Scan `docs/` — especially `docs/features/*.md` — for any file describing a s
 
 **2. Does this change warrant a NEW doc?**
 Per CLAUDE.md, add `docs/features/<feature>.md` when you ship something "complex enough that re-deriving how it works from code would be slow" — multi-file features, operational levers (kill switches, queues, cron jobs), anything with a runbook, secrets, or a non-obvious data flow. A pure UI tweak / bug fix / refactor does NOT need one. When in doubt, ask the user.
-- If the feature affects iOS rendering that unit tests can't reach, also add a `## Visual smoke test` section (see CLAUDE.md "Visual smoke tests").
+- A `## Visual smoke test` section is **optional** now — `/qa` derives the navigation path from the code itself, so you don't need to author steps. If a flow has non-obvious pre-conditions (seeded state, a specific golden account) worth recording, a short section still helps `/qa` as a hint.
 
 **3. Do CLAUDE.md / AGENTS.md need updating?**
 These two files are **always loaded into context** — every token in them is paid on every session. Treat them as an *index*, not a manual.
@@ -689,34 +689,14 @@ ANDROID_UI_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E '^android/.*/(ui|compone
 PLIST_KEY_DIFF=$(git diff -G "NSSupportsLiveActivities|CFBundleURLTypes|NSExtensionPointIdentifier" origin/main..HEAD --name-only -- "ios/**/*.plist" "ios/project.yml" || true)
 ```
 
-For each non-empty surface, run that surface's verification:
+For each non-empty surface, offer the verification — all surfaces now go through **`/qa`**, which auto-derives the navigation path from the diff, drives the affected surface (iOS via Appium, Android via adb + uiautomator, web/admin via the browser, API directly), screenshots every step, and produces an HTML walkthrough report it opens in Chrome.
 
-### iOS surface (`IOS_UI_DIFF` or `PLIST_KEY_DIFF` non-empty)
+### Any non-empty surface (`IOS_UI_DIFF`, `PLIST_KEY_DIFF`, `WEB_DIFF`, `ADMIN_DIFF`, or `ANDROID_UI_DIFF`)
 
-1. **List candidate features.** `grep -li "^## visual smoke test" docs/features/*.md`. Show candidates and let the user pick — **don't reverse-engineer file→feature mappings**, the mapping is intentionally manual.
-2. Prompt: *"iOS UI changed. Run `/qa` smoke test before merge? Available: [list]. Or 'skip'."*
-   - **picks** → invoke `/qa <feature>`. **Pause merge on any ❌**.
+1. Prompt: *"`<surface(s)>` changed. Run `/qa` to drive the affected flow and produce a walkthrough report before merge? Or 'skip'."*
+   - **picks** → invoke `/qa` (no feature name needed — it scopes itself from the branch diff and walks each affected surface). Review the report it opens. **Pause merge on any ❌** (broken render, crash, console / logcat error, network failure).
    - **skip** → note the skip in the merge comment.
-3. If no feature has a `## Visual smoke test` section, surface that gap and continue.
-
-### Web surface (`WEB_DIFF` non-empty)
-
-1. Prompt: *"Web pages/components changed. Run `/chrome` to smoke-test the affected flow before merge? Or 'skip'."*
-   - **picks** → invoke `/chrome <path>` (default `/`) and walk the user-facing flow. Take screenshots of any visual changes. **Pause merge on any ❌** (broken render, console error, network failure).
-   - **skip** → note in the merge comment.
-
-### Admin surface (`ADMIN_DIFF` non-empty)
-
-1. Prompt: *"Admin tools changed. Smoke-test the admin flow before merge? Or 'skip'."*
-   - **picks** → boot dev server (`/chrome /admin` or whatever path is affected), exercise the admin action end-to-end (e.g., force-end an LA, flip a config flag, view a dashboard). Verify the action's side effect actually happens (Firestore write, log line, UI state change).
-   - **skip** → note in the merge comment.
-
-### Android surface (`ANDROID_UI_DIFF` non-empty)
-
-1. Prompt: *"Android UI changed. Build + run on the emulator (`/simulator android`) and drive the affected flow before merge? Or 'skip'."*
-   - **picks** → invoke `/simulator android` to build, install, and launch on the emulator, then drive the changed flow. Take a screenshot of any visual change. **Pause merge on any ❌** (crash, broken render, logcat error).
-   - **skip** → note the skip in the merge comment.
-2. There is no Android `/qa` (computer-use-driven) equivalent yet — verification is manual via the emulator. If the change has an iOS counterpart with a `## Visual smoke test`, the same steps apply conceptually; check parity by eye.
+2. `/qa` figures out the path itself — there's no longer a `## Visual smoke test` section to list or maintain. If a feature doc happens to have one, `/qa` uses it as a hint.
 
 ### Skip Step 5.5 entirely when:
 - The diff is server-only (`src/lib/**`, `src/app/api/**`, `firestore.rules`) — unit tests are the verification, no rendered surface to check.
@@ -729,7 +709,7 @@ When in doubt, ask. The cost of a 30s confirmation prompt is much smaller than s
 
 ## Step 5.6 — Automated UI test coverage (iOS, REQUIRED for behavior changes)
 
-Step 5.5's `/qa` is human-driven visual verification. This step is the *automated* counterpart: decide which existing XCUITest covers the changed flow (and run it), or write a new one if the behavior isn't covered. Catches regressions later when the human running `/qa` doesn't.
+Step 5.5's `/qa` is a one-shot visual walkthrough (drive the app, screenshot, report) — it does not leave behind a regression net. This step is the *automated* counterpart: decide which existing XCUITest covers the changed flow (and run it), or write a new one if the behavior isn't covered. Catches regressions later when nobody's running `/qa`.
 
 The XCUITest stack lives at `ios/DatingAIAssistantUITests/`, runs via `./scripts/run-ui-tests.sh <ClassName>` — it mints a Firebase custom token, signs in as the QA user, then drives the app. Page objects in `TestSupport/Pages/` centralize locators per screen.
 
@@ -847,7 +827,7 @@ Verify:
 
 For iOS that hits server: confirm the sim is pointing at the local dev server (or staging), drive the flow, watch dev-server logs for the inbound request, watch Xcode console for the response.
 
-For iOS animation changes: drive the affected flow in the sim and **observe the transition play through** — start state → in-flight motion → end state. A single screenshot of the end frame is not a verification (a broken animation can still settle on a correct-looking final frame). Use `/qa <feature>` if a smoke test exists; otherwise drive the sim with computer-use and screen-record the transition. If neither is possible, ask the user to play it back before merge. Describe the motion across time when reporting back, not a still from the recording — "the hero card scales smoothly from 200pt to fullscreen over ~0.4s" is a verification; "the end frame shows the photo fullscreen" is not.
+For iOS animation changes: drive the affected flow in the sim and **observe the transition play through** — start state → in-flight motion → end state. A single screenshot of the end frame is not a verification (a broken animation can still settle on a correct-looking final frame). Run `/qa` to drive the flow, but for motion specifically also screen-record the transition (a still report frame can't show jank). If neither is possible, ask the user to play it back before merge. Describe the motion across time when reporting back, not a still from the recording — "the hero card scales smoothly from 200pt to fullscreen over ~0.4s" is a verification; "the end frame shows the photo fullscreen" is not.
 
 ### When you can't run it yourself — ASK
 
@@ -856,7 +836,7 @@ Some verifications need things the agent doesn't have:
 | Situation | Ask the user |
 |---|---|
 | Need a signed-in user state on web | *"I need an authenticated browser session to hit this endpoint. Want me to walk you through it with `/chrome`, or can you run the curl for me?"* |
-| Need to drive the iOS simulator | *"Want me to run `/qa <feature>` or use computer-use to drive the sim and verify? Either way, this needs to be exercised before merge."* |
+| Need to drive the iOS simulator | *"Want me to run `/qa` to drive the sim and produce a walkthrough report? This needs to be exercised before merge."* |
 | Need real IAP receipts / App Store sandbox state | *"This touches IAP receipt validation. I can't exercise it without sandbox state. Can you run the purchase flow on TestFlight and confirm the credit ledger lands correctly?"* |
 | Need production-only services (live APNs, real Apple webhook) | *"This webhook code only fires in production. Want me to ship behind a feature flag and verify in prod, or wait to merge until we can replay a captured payload here?"* |
 
