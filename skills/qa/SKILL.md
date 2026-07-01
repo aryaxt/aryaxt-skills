@@ -37,6 +37,13 @@ A change can touch any combination of **iOS** (`ios/`), **Android** (`android/`)
 
 If multiple surfaces are affected, do each in its own report section. Don't let "tested on iOS" stand in for "tested on web."
 
+**Coverage is mandatory, not best-effort — driving only iOS when the change also touches web/Android is a defective run.** This app is web + iOS + Android and most user-facing changes land on all three (or a shared server change fans out to all three per Step 3 #4). So:
+
+1. **Write the surface list down first.** Before touching any device, state explicitly which surfaces are in scope and why, e.g. *"Surfaces in scope: iOS, Android, Web (shared scene-confirm sheet lives on all three)."* This list is a contract — the report must cover every surface on it.
+2. **Drive every surface on the list.** iOS via Appium, Android via adb+uiautomator, web via the browser — each gets its own screenshots and its own report section. Being mid-iOS is not an excuse to skip Android/web.
+3. **Never silently drop a surface.** If a surface is genuinely in scope but you cannot drive it (emulator won't boot, dev server down, blocked capability), you do **not** just omit it — you keep it in the report with an explicit **"Not covered — <reason>"** note so the gap is visible. A missing surface with no explanation is a bug in the run.
+4. A surface is **out of scope only if the diff + impact analysis show it genuinely isn't affected** (e.g. an iOS-only Live Activity change never reaches web/Android). Say so explicitly rather than leaving it ambiguous.
+
 ## Step 3 — analyze the code and derive the path (the part that replaces authored steps)
 
 Read the changed/relevant files and build a mental model of the flow **before touching a device**:
@@ -152,6 +159,7 @@ Then **Read that screenshot** (the image, not the HTML source) and scan it as a 
 - **Mermaid** — diagrams must actually **render to SVG**, not show raw ```` ```mermaid ```` source or an error box. (Headless screenshot may race the CDN — if a diagram looks unrendered, also open it visibly and confirm before blaming the report.) Verify the diagram content matches the real code, not a placeholder.
 - **Empty / placeholder content** — no `TODO`, `lorem`, `undefined`, `[object Object]`, or stub captions left in.
 - **Platform segmented control** (multi-platform reports) — clicking each segment must actually swap to that platform's panel; exactly one panel visible at a time, the default segment shows on load, and no panel is orphaned/hidden-forever. Drive it (open visibly and click each segment, or read the toggle JS) and confirm every platform's content is reachable.
+- **Surface-coverage completeness** — cross-check the rendered report against the in-scope surface list you wrote in Step 2. **Every in-scope surface must appear** with either real screenshots or an explicit "Not covered — <reason>" note. If the list said iOS + Android + Web but the report only has iOS, the run is incomplete: go back to Step 4, drive the missing surface(s), and only then re-render. Do not show the user a report that silently covers fewer platforms than the change touched.
 
 **If the report contains any custom animation or CSS transition, review it frame by frame.** A still screenshot cannot prove an animation is correct. Open the report visibly and capture the motion across time, then inspect the frames:
 
