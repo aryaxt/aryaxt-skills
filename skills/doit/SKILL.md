@@ -241,7 +241,7 @@ These two files are **always loaded into context** — every token in them is pa
 
 **The pollution rule:** CLAUDE.md and AGENTS.md grow by *links*, not by *prose*. If you're about to add more than ~3 lines to either file, that content belongs in a `docs/` file with a one-line pointer from CLAUDE.md instead — so it loads into context only when actually needed.
 
-If any doc work is needed, do it now (same PR) before dispatching review — the review agents should see the docs alongside the code.
+If any doc work is needed, do it now (same PR) before dispatching review — the review agents should see the docs alongside the code. Note that the review agents judge *code*, not prose, so any doc/prose change you make here triggers the **human doc-review gate in Step 6** — the user must approve the wording before merge.
 
 ## Step 3.10 — Cross-repo / cross-branch dependency check (before review)
 
@@ -689,7 +689,7 @@ ANDROID_UI_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E '^android/.*/(ui|compone
 PLIST_KEY_DIFF=$(git diff -G "NSSupportsLiveActivities|CFBundleURLTypes|NSExtensionPointIdentifier" origin/main..HEAD --name-only -- "ios/**/*.plist" "ios/project.yml" || true)
 ```
 
-For each non-empty surface, offer the verification — all surfaces now go through **`/qa`**, which auto-derives the navigation path from the diff, drives the affected surface (iOS via Appium, Android via adb + uiautomator, web/admin via the browser, API directly), screenshots every step, and produces an HTML walkthrough report it opens in Chrome.
+For each non-empty surface, offer the verification — all surfaces now go through **`/qa`**, which auto-derives the navigation path from the diff, drives the affected surface (iOS via Appium, Android via adb + uiautomator, web/admin via the browser, API directly), screenshots every step, and produces a walkthrough report (`report.md` + `report.pdf` + `report.html`) it opens in Preview.
 
 ### Any non-empty surface (`IOS_UI_DIFF`, `PLIST_KEY_DIFF`, `WEB_DIFF`, `ADMIN_DIFF`, or `ANDROID_UI_DIFF`)
 
@@ -697,6 +697,42 @@ For each non-empty surface, offer the verification — all surfaces now go throu
    - **picks** → invoke `/qa` (no feature name needed — it scopes itself from the branch diff and walks each affected surface). Review the report it opens. **Pause merge on any ❌** (broken render, crash, console / logcat error, network failure).
    - **skip** → note the skip in the merge comment.
 2. `/qa` figures out the path itself — there's no longer a `## Visual smoke test` section to list or maintain. If a feature doc happens to have one, `/qa` uses it as a hint.
+
+### Post the `/qa` report to the PR (REQUIRED whenever `/qa` produced one)
+
+`/qa` writes `report.md` + `report.pdf` + `report.html` into `.qa-reports/<dir>/` (gitignored — never commit them into the PR branch). When a report exists, attach it to the PR so the walkthrough + screenshots live with the change, not just on your disk:
+
+1. **Post `report.md` as a PR comment, rendered inline.** The markdown references screenshots by relative path (`assets/NN-slug.png`); GitHub can't resolve those, so the images must be hosted first. Upload the `assets/` PNGs to a **dedicated, never-merged `qa-reports` branch** (keeps them out of `main` while giving GitHub a raw URL to serve), then rewrite the paths in a copy of `report.md` to the raw URLs before posting:
+
+   ```bash
+   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+   DIR=.qa-reports/<dir>; PR=<PR-number>
+   # Publish the screenshots AND the self-contained PDF on a dedicated, never-merged
+   # assets branch (create once, reuse). Clear any stale worktree from an aborted run first.
+   git worktree remove --force /tmp/qa-assets 2>/dev/null || true; rm -rf /tmp/qa-assets
+   if git fetch origin qa-reports 2>/dev/null; then
+     git worktree add /tmp/qa-assets qa-reports            # branch exists — reuse it
+   else
+     git worktree add --detach /tmp/qa-assets HEAD         # first time: make a worktree…
+     git -C /tmp/qa-assets checkout --orphan qa-reports    # …then a fresh orphan branch (portable, no git ≥2.42 dep)
+     git -C /tmp/qa-assets rm -rfq . 2>/dev/null || true   # clear the inherited tree
+   fi
+   mkdir -p "/tmp/qa-assets/pr-$PR"
+   cp "$DIR"/assets/* "$DIR/report.pdf" "/tmp/qa-assets/pr-$PR/"   # PNGs AND the PDF
+   git -C /tmp/qa-assets add -A && git -C /tmp/qa-assets commit -q -m "qa assets for PR #$PR" \
+     && git -C /tmp/qa-assets push -q origin qa-reports
+   git worktree remove --force /tmp/qa-assets
+   # Rewrite relative asset paths → raw URLs, then post as a comment.
+   BASE="https://raw.githubusercontent.com/$REPO/qa-reports/pr-$PR"
+   sed -E "s#\((assets/([^)]+))\)#(${BASE}/\2)#g" "$DIR/report.md" > "$DIR/report.pr.md"
+   gh pr comment "$PR" --body-file "$DIR/report.pr.md"
+   ```
+
+   Keep the `qa-reports` branch out of the merge (never base a PR on it, never merge it into `main`); it's an asset host, the same way a `gh-pages`-style branch is.
+2. **Attach `report.pdf` too** — it's self-contained (screenshots embedded) so it survives even if the raw-URL images ever break, and it's the file the user opened in Preview. The Step-1 bash already copies it to the assets branch alongside the PNGs; link it from the comment: `[report.pdf](https://raw.githubusercontent.com/$REPO/qa-reports/pr-$PR/report.pdf)` (same `raw.githubusercontent.com` host as the images).
+3. If the assets-branch upload fails or the repo forbids extra branches, **fall back to posting `report.md` with the images stripped to a short "screenshots in the attached PDF" note**, and link the local report dir — never post markdown with broken relative image links.
+
+Do this right after the `/qa` report is reviewed and before merge, so the PR reviewer (and the audit trail) has the visual walkthrough.
 
 ### Skip Step 5.5 entirely when:
 - The diff is server-only (`src/lib/**`, `src/app/api/**`, `firestore.rules`) — unit tests are the verification, no rendered surface to check.
@@ -1074,6 +1110,24 @@ Same no-deploy caveat as 5.9b — a red suite on main doesn't immediately ship, 
 ## Step 6 — Merge
 
 Once all Critical and Important issues are resolved:
+
+### Hard gate: human review of doc / prose changes (REQUIRED before merge)
+
+The parallel review agents judge **code** — correctness, contracts, anti-patterns. They do **not** judge whether prose reads the way the user wants. So any PR that adds or changes **documentation or prose** must be shown to the user for approval **before** the merge command runs. This covers:
+
+- `docs/**` (feature docs, runbooks, specs, design docs)
+- `*.md` anywhere — including `CLAUDE.md` / `AGENTS.md`, `README`s, and **`aryaxt-skills` skill `SKILL.md` files** (a skill's instructions are the product; a wrong line silently changes future behavior)
+- user-visible copy that reads as prose (marketing / onboarding / paywall strings)
+
+Do this:
+
+1. Detect it: `git diff origin/main..HEAD --name-only` matching `\.md$|^docs/|SKILL\.md$`. If nothing matches, skip this gate entirely and merge.
+2. If it matches, **show the user the actual prose diff** (the changed sections, not just the filenames) and state plainly: *"This PR changes docs/skill instructions. Review before I merge?"*
+3. **Wait for the user's explicit OK.** They may edit the wording first (directly on the branch or by telling you what to change) — fold in their edits, re-push, then merge. Do not merge doc/prose changes on the user's behalf without this checkpoint, even when every code gate is green.
+
+Code-only PRs (no `.md` / `docs/` in the diff) are unaffected — they merge under the normal automated-gate flow below.
+
+Then merge:
 
 ```bash
 gh pr merge <PR-number> --squash --delete-branch
