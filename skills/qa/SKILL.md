@@ -1,6 +1,6 @@
 ---
 name: qa
-description: Investigate a change or a bug report, drive the real app to see it (iOS via Appium, Android via adb + uiautomator, web via the browser, API via direct calls), screenshot every step along the way, then produce a beautiful self-contained HTML report — the path taken, every screen, plus class/DB diagrams when the code warrants — and open it in Chrome. In bug mode it also reproduces, root-causes, fixes, re-verifies (before/after), and hands the fix to /doit to ship. Use when the user types /qa, says "verify this works", "show me how it looks", "test the X flow", "qa this branch", "I found a bug …", "investigate why X is broken", or any variant of "make sure the UI actually works / prove this works".
+description: Investigate a change or a bug report, drive the real app to see it (iOS via Appium, Android via adb + uiautomator, web via the browser, API via direct calls), screenshot every step along the way, then produce a beautiful report (HTML + a Markdown mirror for the PR + a self-contained PDF) — the path taken, every screen, plus class/DB diagrams when the code warrants — and open the PDF in Preview. In bug mode it also reproduces, root-causes, fixes, re-verifies (before/after), and hands the fix to /doit to ship. Use when the user types /qa, says "verify this works", "show me how it looks", "test the X flow", "qa this branch", "I found a bug …", "investigate why X is broken", or any variant of "make sure the UI actually works / prove this works".
 ---
 
 # /qa — investigate, drive the app, and produce a visual walkthrough report
@@ -107,15 +107,30 @@ When the change is server-only with no rendered surface (or you want to prove th
 
 ## Step 6 — build the HTML report
 
-Write a **self-contained, beautiful** `report.html` into a gitignored per-run dir, with screenshots referenced from a sibling `assets/`:
+Write a **self-contained, beautiful** `report.html` into a gitignored per-run dir, with screenshots referenced from a sibling `assets/`. Alongside it, emit a **`report.md`** (the same walkthrough as Markdown) so `/doit` can post the report inline on the PR, and — because the HTML embeds only local `assets/` paths — a **`report.pdf`** (screenshots baked in) that opens in Preview and can be attached to a PR as a self-contained file:
 
 ```
 .qa-reports/<YYYYMMDD-HHMMSS>-<slug>/
   report.html
+  report.md          # Markdown mirror — /doit posts this as a PR comment (images uploaded so they render inline)
+  report.pdf         # self-contained (screenshots embedded) — opens in Preview, attachable to a PR
   assets/01-….png  02-….png  …
 ```
 
 Ensure `.qa-reports/` is gitignored (append it to the repo's `.gitignore` if missing — reports are local artifacts, never committed).
+
+**`report.md` — the PR-facing mirror.** Same content as the HTML (header, summary, the numbered path-taken timeline with each screenshot inline via `![caption](assets/NN-slug.png)`, before/after, affected functionality, diagrams as fenced ```` ```mermaid ```` blocks — GitHub renders these natively — API calls, root cause + fix, verdict). For a multi-platform run, drop the segmented control and just use one `## iOS` / `## Android` / `## Web` / `## Backend` H2 section per platform. Keep the image paths **relative** (`assets/NN-slug.png`); `/doit` rewrites them to the uploaded URLs when it posts the comment. This file is what actually reaches the PR, so it must stand on its own as a readable document.
+
+**`report.pdf` — render it from the finished HTML** (after Step 6.5's self-review, so the PDF reflects the clean report), via headless Chrome:
+
+```
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --headless=new --no-pdf-header-footer --print-to-pdf-no-header \
+  --print-to-pdf="$(pwd)/.qa-reports/<dir>/report.pdf" \
+  "file://$(pwd)/.qa-reports/<dir>/report.html"
+```
+
+If the report has a platform segmented control, only the default segment is visible in print — that's acceptable for the PDF (the `report.md` carries all platforms); or print with all panels forced visible via a print stylesheet (`@media print { [data-platform] { display:block !important } }`) so every platform lands in the PDF. Prefer the print-stylesheet approach so the PDF is complete.
 
 The report must let the user *understand how it was tested and see how the UI looked*. Structure:
 
@@ -176,17 +191,19 @@ Read the frame sequence and confirm the animation **starts, runs, and ends clean
 
 **Re-render after every fix** and re-inspect — don't assume the edit worked. Only once the rendered report is clean on every point above do you move to Step 7.
 
-## Step 7 — open it in Chrome
+## Step 7 — render the PDF and open it in Preview
+
+Now that the HTML is clean (Step 6.5), render `report.pdf` from it (the `--print-to-pdf` command in Step 6) so the PDF reflects the reviewed report, then open **the PDF in Preview** — not the HTML in Chrome:
 
 ```
-open -a "Google Chrome" ".qa-reports/<dir>/report.html"
+open -a Preview ".qa-reports/<dir>/report.pdf"
 ```
 
-Tell the user the report path and give a 2-3 line spoken summary of the verdict. The HTML is the deliverable — don't recreate it in chat.
+Preview renders PDF/images, not HTML — so the deliverable the user opens is the PDF. (The `report.html` remains on disk as the interactive version; the `report.md` is what `/doit` posts to the PR.) Tell the user the report dir and give a 2-3 line spoken summary of the verdict. The report is the deliverable — don't recreate it in chat.
 
 ## Step 8 (bug mode with a fix) — hand off to /doit
 
-If you made a code change, **invoke `/doit`** (Skill tool) to ship it. `/doit` owns branch + PR + multi-agent review + merge — `/qa` does **not** open its own PR. Pass `/doit` the context and **link the report** so it lands in the PR body (copy the report dir somewhere durable or attach the key screenshots). On a clean branch, `/doit` will create the branch; otherwise it splits/commits as usual.
+If you made a code change, **invoke `/doit`** (Skill tool) to ship it. `/doit` owns branch + PR + multi-agent review + merge — `/qa` does **not** open its own PR. Pass `/doit` the context and **the report dir path** so it can post `report.md` inline on the PR (and attach `report.pdf`) — `/doit`'s "QA report → PR" step owns the image upload + comment. On a clean branch, `/doit` will create the branch; otherwise it splits/commits as usual.
 
 Verify mode never auto-ships — it only reports.
 

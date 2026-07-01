@@ -689,7 +689,7 @@ ANDROID_UI_DIFF=$(echo "$DIFF_FILES" | /usr/bin/grep -E '^android/.*/(ui|compone
 PLIST_KEY_DIFF=$(git diff -G "NSSupportsLiveActivities|CFBundleURLTypes|NSExtensionPointIdentifier" origin/main..HEAD --name-only -- "ios/**/*.plist" "ios/project.yml" || true)
 ```
 
-For each non-empty surface, offer the verification — all surfaces now go through **`/qa`**, which auto-derives the navigation path from the diff, drives the affected surface (iOS via Appium, Android via adb + uiautomator, web/admin via the browser, API directly), screenshots every step, and produces an HTML walkthrough report it opens in Chrome.
+For each non-empty surface, offer the verification — all surfaces now go through **`/qa`**, which auto-derives the navigation path from the diff, drives the affected surface (iOS via Appium, Android via adb + uiautomator, web/admin via the browser, API directly), screenshots every step, and produces a walkthrough report (`report.md` + `report.pdf` + `report.html`) it opens in Preview.
 
 ### Any non-empty surface (`IOS_UI_DIFF`, `PLIST_KEY_DIFF`, `WEB_DIFF`, `ADMIN_DIFF`, or `ANDROID_UI_DIFF`)
 
@@ -697,6 +697,34 @@ For each non-empty surface, offer the verification — all surfaces now go throu
    - **picks** → invoke `/qa` (no feature name needed — it scopes itself from the branch diff and walks each affected surface). Review the report it opens. **Pause merge on any ❌** (broken render, crash, console / logcat error, network failure).
    - **skip** → note the skip in the merge comment.
 2. `/qa` figures out the path itself — there's no longer a `## Visual smoke test` section to list or maintain. If a feature doc happens to have one, `/qa` uses it as a hint.
+
+### Post the `/qa` report to the PR (REQUIRED whenever `/qa` produced one)
+
+`/qa` writes `report.md` + `report.pdf` + `report.html` into `.qa-reports/<dir>/` (gitignored — never commit them into the PR branch). When a report exists, attach it to the PR so the walkthrough + screenshots live with the change, not just on your disk:
+
+1. **Post `report.md` as a PR comment, rendered inline.** The markdown references screenshots by relative path (`assets/NN-slug.png`); GitHub can't resolve those, so the images must be hosted first. Upload the `assets/` PNGs to a **dedicated, never-merged `qa-reports` branch** (keeps them out of `main` while giving GitHub a raw URL to serve), then rewrite the paths in a copy of `report.md` to the raw URLs before posting:
+
+   ```bash
+   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+   DIR=.qa-reports/<dir>; PR=<PR-number>
+   # Publish assets on an orphan-ish assets branch (create once, reuse; force-push per PR path).
+   git fetch origin qa-reports 2>/dev/null && git worktree add /tmp/qa-assets qa-reports \
+     || git worktree add --orphan -b qa-reports /tmp/qa-assets
+   mkdir -p "/tmp/qa-assets/pr-$PR" && cp "$DIR"/assets/* "/tmp/qa-assets/pr-$PR/"
+   git -C /tmp/qa-assets add -A && git -C /tmp/qa-assets commit -q -m "qa assets for PR #$PR" \
+     && git -C /tmp/qa-assets push -q origin qa-reports
+   git worktree remove /tmp/qa-assets
+   # Rewrite relative asset paths → raw URLs, then post as a comment.
+   BASE="https://raw.githubusercontent.com/$REPO/qa-reports/pr-$PR"
+   sed -E "s#\((assets/([^)]+))\)#(${BASE}/\2)#g" "$DIR/report.md" > "$DIR/report.pr.md"
+   gh pr comment "$PR" --body-file "$DIR/report.pr.md"
+   ```
+
+   Keep the `qa-reports` branch out of the merge (never base a PR on it, never merge it into `main`); it's an asset host, the same way a `gh-pages`-style branch is.
+2. **Attach `report.pdf` too** — it's self-contained (screenshots embedded) so it survives even if the raw-URL images ever break, and it's the file the user opened in Preview. Drop it in the same comment (`gh` can't upload a binary to a comment via API, so reference it from the assets branch as well: `[report.pdf](https://github.com/$REPO/raw/qa-reports/pr-$PR/report.pdf)` after copying it alongside the PNGs).
+3. If the assets-branch upload fails or the repo forbids extra branches, **fall back to posting `report.md` with the images stripped to a short "screenshots in the attached PDF" note**, and link the local report dir — never post markdown with broken relative image links.
+
+Do this right after the `/qa` report is reviewed and before merge, so the PR reviewer (and the audit trail) has the visual walkthrough.
 
 ### Skip Step 5.5 entirely when:
 - The diff is server-only (`src/lib/**`, `src/app/api/**`, `firestore.rules`) — unit tests are the verification, no rendered surface to check.
