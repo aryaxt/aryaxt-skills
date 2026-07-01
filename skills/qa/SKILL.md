@@ -125,7 +125,7 @@ Ensure `.qa-reports/` is gitignored (append it to the repo's `.gitignore` if mis
 
 ```
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --headless=new --no-pdf-header-footer --print-to-pdf-no-header \
+  --headless=new --print-to-pdf-no-header \
   --print-to-pdf="$(pwd)/.qa-reports/<dir>/report.pdf" \
   "file://$(pwd)/.qa-reports/<dir>/report.html"
 ```

@@ -707,13 +707,21 @@ For each non-empty surface, offer the verification — all surfaces now go throu
    ```bash
    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
    DIR=.qa-reports/<dir>; PR=<PR-number>
-   # Publish assets on an orphan-ish assets branch (create once, reuse; force-push per PR path).
-   git fetch origin qa-reports 2>/dev/null && git worktree add /tmp/qa-assets qa-reports \
-     || git worktree add --orphan -b qa-reports /tmp/qa-assets
-   mkdir -p "/tmp/qa-assets/pr-$PR" && cp "$DIR"/assets/* "/tmp/qa-assets/pr-$PR/"
+   # Publish the screenshots AND the self-contained PDF on a dedicated, never-merged
+   # assets branch (create once, reuse). Clear any stale worktree from an aborted run first.
+   git worktree remove --force /tmp/qa-assets 2>/dev/null || true; rm -rf /tmp/qa-assets
+   if git fetch origin qa-reports 2>/dev/null; then
+     git worktree add /tmp/qa-assets qa-reports            # branch exists — reuse it
+   else
+     git worktree add --detach /tmp/qa-assets HEAD         # first time: make a worktree…
+     git -C /tmp/qa-assets checkout --orphan qa-reports    # …then a fresh orphan branch (portable, no git ≥2.42 dep)
+     git -C /tmp/qa-assets rm -rfq . 2>/dev/null || true   # clear the inherited tree
+   fi
+   mkdir -p "/tmp/qa-assets/pr-$PR"
+   cp "$DIR"/assets/* "$DIR/report.pdf" "/tmp/qa-assets/pr-$PR/"   # PNGs AND the PDF
    git -C /tmp/qa-assets add -A && git -C /tmp/qa-assets commit -q -m "qa assets for PR #$PR" \
      && git -C /tmp/qa-assets push -q origin qa-reports
-   git worktree remove /tmp/qa-assets
+   git worktree remove --force /tmp/qa-assets
    # Rewrite relative asset paths → raw URLs, then post as a comment.
    BASE="https://raw.githubusercontent.com/$REPO/qa-reports/pr-$PR"
    sed -E "s#\((assets/([^)]+))\)#(${BASE}/\2)#g" "$DIR/report.md" > "$DIR/report.pr.md"
@@ -721,7 +729,7 @@ For each non-empty surface, offer the verification — all surfaces now go throu
    ```
 
    Keep the `qa-reports` branch out of the merge (never base a PR on it, never merge it into `main`); it's an asset host, the same way a `gh-pages`-style branch is.
-2. **Attach `report.pdf` too** — it's self-contained (screenshots embedded) so it survives even if the raw-URL images ever break, and it's the file the user opened in Preview. Drop it in the same comment (`gh` can't upload a binary to a comment via API, so reference it from the assets branch as well: `[report.pdf](https://github.com/$REPO/raw/qa-reports/pr-$PR/report.pdf)` after copying it alongside the PNGs).
+2. **Attach `report.pdf` too** — it's self-contained (screenshots embedded) so it survives even if the raw-URL images ever break, and it's the file the user opened in Preview. The Step-1 bash already copies it to the assets branch alongside the PNGs; link it from the comment: `[report.pdf](https://raw.githubusercontent.com/$REPO/qa-reports/pr-$PR/report.pdf)` (same `raw.githubusercontent.com` host as the images).
 3. If the assets-branch upload fails or the repo forbids extra branches, **fall back to posting `report.md` with the images stripped to a short "screenshots in the attached PDF" note**, and link the local report dir — never post markdown with broken relative image links.
 
 Do this right after the `/qa` report is reviewed and before merge, so the PR reviewer (and the audit trail) has the visual walkthrough.
