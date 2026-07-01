@@ -241,7 +241,7 @@ These two files are **always loaded into context** — every token in them is pa
 
 **The pollution rule:** CLAUDE.md and AGENTS.md grow by *links*, not by *prose*. If you're about to add more than ~3 lines to either file, that content belongs in a `docs/` file with a one-line pointer from CLAUDE.md instead — so it loads into context only when actually needed.
 
-If any doc work is needed, do it now (same PR) before dispatching review — the review agents should see the docs alongside the code.
+If any doc work is needed, do it now (same PR) before dispatching review — the review agents should see the docs alongside the code. Note that the review agents judge *code*, not prose, so any doc/prose change you make here triggers the **human doc-review gate in Step 6** — the user must approve the wording before merge.
 
 ## Step 3.10 — Cross-repo / cross-branch dependency check (before review)
 
@@ -1074,6 +1074,24 @@ Same no-deploy caveat as 5.9b — a red suite on main doesn't immediately ship, 
 ## Step 6 — Merge
 
 Once all Critical and Important issues are resolved:
+
+### Hard gate: human review of doc / prose changes (REQUIRED before merge)
+
+The parallel review agents judge **code** — correctness, contracts, anti-patterns. They do **not** judge whether prose reads the way the user wants. So any PR that adds or changes **documentation or prose** must be shown to the user for approval **before** the merge command runs. This covers:
+
+- `docs/**` (feature docs, runbooks, specs, design docs)
+- `*.md` anywhere — including `CLAUDE.md` / `AGENTS.md`, `README`s, and **`aryaxt-skills` skill `SKILL.md` files** (a skill's instructions are the product; a wrong line silently changes future behavior)
+- user-visible copy that reads as prose (marketing / onboarding / paywall strings)
+
+Do this:
+
+1. Detect it: `git diff origin/main..HEAD --name-only` matching `\.md$|^docs/|SKILL\.md$`. If nothing matches, skip this gate entirely and merge.
+2. If it matches, **show the user the actual prose diff** (the changed sections, not just the filenames) and state plainly: *"This PR changes docs/skill instructions. Review before I merge?"*
+3. **Wait for the user's explicit OK.** They may edit the wording first (directly on the branch or by telling you what to change) — fold in their edits, re-push, then merge. Do not merge doc/prose changes on the user's behalf without this checkpoint, even when every code gate is green.
+
+Code-only PRs (no `.md` / `docs/` in the diff) are unaffected — they merge under the normal automated-gate flow below.
+
+Then merge:
 
 ```bash
 gh pr merge <PR-number> --squash --delete-branch
