@@ -129,11 +129,26 @@ try {
   console.log(`assigned versionCode ${versionCode} to track "${track}" (status=${release.status}${release.userFraction ? `, rollout=${release.userFraction}` : ""})`);
 
   // 4) Commit — nothing above is live until this succeeds.
-  // changesNotSentForReview: true is REQUIRED for review-gated apps — otherwise
-  // the Publishing API rejects the commit with HTTP 400 ("Changes cannot be sent
-  // for review automatically..."). With it set, the edit commits and the build is
-  // sent for review from the Play Console as usual.
-  const committed = await androidpublisher.edits.commit({ packageName, editId, changesNotSentForReview: true });
+  // Play flip-flops on whether `changesNotSentForReview` is allowed, depending on
+  // the app's current review configuration:
+  //   - Some apps REQUIRE it (HTTP 400 "Changes cannot be sent for review
+  //     automatically..." when it's absent).
+  //   - Some apps REJECT it (HTTP 400 "Changes are sent for review automatically.
+  //     The query parameter changesNotSentForReview must not be set.").
+  // We can't know which regime an app is in ahead of time, so try WITHOUT the flag
+  // first, and fall back to WITH it only when Play explicitly demands it. This
+  // survives the app moving between regimes without a code change.
+  let committed;
+  try {
+    committed = await androidpublisher.edits.commit({ packageName, editId });
+  } catch (e) {
+    const msg = String(e?.errors?.[0]?.message || e?.response?.data?.error?.message || e?.message || "");
+    if (/cannot be sent for review automatically|changesNotSentForReview.*must be set/i.test(msg)) {
+      committed = await androidpublisher.edits.commit({ packageName, editId, changesNotSentForReview: true });
+    } else {
+      throw e;
+    }
+  }
   editId = null; // committed edits must not be deleted
   console.log(`committed edit ${committed.data.id} — versionCode ${versionCode} is live on "${track}".`);
   console.log(`Play is now processing the bundle. Watch: https://play.google.com/console`);
