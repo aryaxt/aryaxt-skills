@@ -94,13 +94,29 @@ UDID="${STICKY:-$(pick_udid "iPhone" "${PREFERRED_IPHONE[@]}")}"  # iPad: use PR
 
 If `$UDID` is empty: surface "no iPhone (or iPad) simulator installed — install one via Xcode → Settings → Platforms" and stop. Don't fall back to a different family.
 
-## Step 3 — open Simulator.app
+## Step 3 — connect the hardware keyboard, then open Simulator.app
+
+Set the Simulator's **Connect Hardware Keyboard** preference to ON **before** opening Simulator.app (it reads the pref at launch, and a device reads its per-device value at boot). If this is off, every Mac keystroke goes to the Mac instead of the sim, so `⌥`-debug shortcuts (⌥A appearance, ⌥E environment, ⌥D debug menu, …) and any key input silently do nothing — a confusing "shortcuts stopped working across the whole app" symptom that is NOT a code bug. This is off by default on newer Xcode and gets toggled off accidentally with ⇧⌘K.
 
 ```bash
+# Force the hardware keyboard on: global default (new sims inherit it) + this device.
+python3 - "$UDID" <<'PY'
+import subprocess, plistlib, sys
+udid = sys.argv[1]
+raw = subprocess.run(["defaults","export","com.apple.iphonesimulator","-"],capture_output=True).stdout
+d = plistlib.loads(raw) if raw.strip() else {}
+d["ConnectHardwareKeyboard"] = True                              # default for newly created sims
+dev = d.setdefault("DevicePreferences", {})
+if not isinstance(dev, dict): dev = {}; d["DevicePreferences"] = dev
+dev.setdefault(udid, {})["ConnectHardwareKeyboard"] = True       # this specific device
+subprocess.run(["defaults","import","com.apple.iphonesimulator","-"], input=plistlib.dumps(d), check=True)
+print("ConnectHardwareKeyboard set on (global + %s)" % udid)
+PY
+
 pgrep -x Simulator >/dev/null || open -a Simulator
 ```
 
-If it's already running, skip — re-opening brings it forward but doesn't hurt.
+If Simulator was **already running**, the write still applies to this device on its next boot (Step 4); only already-open windows for other devices keep their current state until re-toggled (⇧⌘K) — not this skill's concern.
 
 ## Step 4 — boot the device
 
