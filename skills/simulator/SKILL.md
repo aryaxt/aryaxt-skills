@@ -281,6 +281,19 @@ xcrun simctl launch "$UDID" com.shivaapps.photoai
 
 `-maxdepth 2` comes before `-name` for portability (GNU `find` requires options first; macOS BSD `find` is flexible but the documented form is options-first).
 
+## Step 7.5 — mirror the sim into the live panel (iOS, Claude Code desktop)
+
+Always finish an iOS run by attaching the **live Simulator panel** so the user watches the app inside Claude Code instead of hunting for the Simulator.app window — the skill builds/boots/dev-servers, the panel is the preview. Use the built-in Claude Code iOS Simulator MCP tool:
+
+> Call `mcp__Claude_Code_iOS_Simulator__control` with `action: "attach"` and `udid: "$UDID"` (the same device you just launched on).
+
+Do this **after** the `simctl install` + `launch` above, so the panel opens onto the already-running app. Notes:
+
+- **iOS only.** The built-in tool cannot mirror an Android emulator — skip this step entirely on the Android path.
+- **Graceful when unavailable.** This tool only exists in the Claude Code desktop app. If it isn't present in the current environment (e.g. the terminal CLI), skip silently — the `simctl` launch already happened, so the app is running regardless; just tell the user to open Simulator.app to see it.
+- **For `all` (iPhone + iPad):** attach the panel to the **last** device launched (the panel shows one device at a time), so the user lands on a live view rather than a dead one.
+- Don't `detach` at the end — leave the panel open so the user can keep watching / testing.
+
 ## Step 8 — confirm
 
 One short sentence per target launched. Include the device name so the user knows which sim got it:
